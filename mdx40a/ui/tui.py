@@ -8,10 +8,12 @@ Curses TUI for Roland MDX-40A.
 Keybindings:
   ←/→        X axis  −/+
   ↑/↓        Y axis  −/+
-  PgUp/PgDn  Z axis  +/−  (PgUp raises, PgDn lowers)
+  a / z      Z axis  +/−  (a raises, z lowers)
   [/]        A axis  −/+
   f          toggle fast / slow jog speed
-  1/2/3      step size: 0.1 / 1.0 / 10.0 mm
+  1/2/3/4    step size: 0.01 / 0.1 / 1.0 / 10.0 mm
+  s          spindle on / off (toggle)
+  < / >      spindle speed −10% / +10%
   q / ESC    quit
 
 Run: sudo python3 -m mdx40a.ui.tui [-v|-vv]
@@ -34,8 +36,8 @@ from . import log as _log
 
 # ── Jog parameters ────────────────────────────────────────────────────────────
 
-STEPS        = [0.1, 1.0, 10.0]
-STEP_LABELS  = ['0.1', '1.0', '10.0']
+STEPS        = [0.01, 0.1, 1.0, 10.0]
+STEP_LABELS  = ['0.01', '0.1', '1.0', '10.0']
 
 # ── Colour pair IDs ───────────────────────────────────────────────────────────
 
@@ -86,7 +88,7 @@ class TUI:
     def __init__(self, machine: _machine.MDX40A, log_buf: _LogBuffer):
         self._m            = machine
         self._log          = log_buf
-        self._step_i       = 1           # index into STEPS (default 1.0 mm)
+        self._step_i       = 2           # index into STEPS (default 1.0 mm)
         self._fast         = False
         self._moving       : Optional[str]             = None   # axis currently jogging
         self._jog_thr      : Optional[threading.Thread] = None
@@ -152,8 +154,10 @@ class TUI:
             curses.KEY_LEFT:  ('X', -1),
             curses.KEY_UP:    ('Y', +1),
             curses.KEY_DOWN:  ('Y', -1),
-            curses.KEY_PPAGE: ('Z', +1),   # PgUp  → raise Z
-            curses.KEY_NPAGE: ('Z', -1),   # PgDn  → lower Z
+            ord('a'):         ('Z', +1),   # a → raise Z
+            ord('A'):         ('Z', +1),
+            ord('z'):         ('Z', -1),   # z → lower Z
+            ord('Z'):         ('Z', -1),
             ord(']'):         ('A', +1),
             ord('['):         ('A', -1),
         }
@@ -171,17 +175,22 @@ class TUI:
             self._step_i = 0
             t = _trace.get_active()
             if t:
-                t.annotate(f"KEY 1  step=0.1mm")
+                t.annotate(f"KEY 1  step=0.01mm")
         elif key == ord('2'):
             self._step_i = 1
             t = _trace.get_active()
             if t:
-                t.annotate(f"KEY 2  step=1.0mm")
+                t.annotate(f"KEY 2  step=0.1mm")
         elif key == ord('3'):
             self._step_i = 2
             t = _trace.get_active()
             if t:
-                t.annotate(f"KEY 3  step=10.0mm")
+                t.annotate(f"KEY 3  step=1.0mm")
+        elif key == ord('4'):
+            self._step_i = 3
+            t = _trace.get_active()
+            if t:
+                t.annotate(f"KEY 4  step=10.0mm")
 
     def _start_jog(self, axis: str, sign: int) -> None:
         if self._jog_thr and self._jog_thr.is_alive():
@@ -311,8 +320,8 @@ class TUI:
         ref_row = height - 2
         if ref_row > row + 1:
             key_lines = [
-                '  ←→ X   ↑↓ Y   PgUp/Dn Z   [] A',
-                '  f fast/slow   1/2/3 step   q quit',
+                '  ←→ X   ↑↓ Y   a/z Z   [] A',
+                '  f fast/slow   1/2/3/4 step   s spindle on/off   <> speed   q quit',
             ]
             for i, line in enumerate(key_lines):
                 r = ref_row + i
@@ -386,7 +395,8 @@ class TUI:
             return
         try:
             # Never write into the very last cell (bottom-right corner triggers error)
-            win.addstr(y, x, text[:avail - (1 if y == rows - 1 else 0)], attr)
+            safe = text.replace('\x00', '·')
+            win.addstr(y, x, safe[:avail - (1 if y == rows - 1 else 0)], attr)
         except curses.error:
             pass
 

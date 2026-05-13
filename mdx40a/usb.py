@@ -5,6 +5,8 @@ No Roland semantics here — just the four primitives the protocol needs.
 All functions raise usb.core.USBError on failure.
 """
 
+import time
+
 import usb.core
 import usb.util
 

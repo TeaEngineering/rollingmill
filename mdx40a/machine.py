@@ -21,9 +21,11 @@ log = logging.getLogger(__name__)
 
 POLL_INTERVAL = 0.200   # seconds
 
-# Jog speeds (units: mm/min as firmware expects them)
-JOG_SPEED_SLOW =  120
-JOG_SPEED_FAST = 3000
+# Jog speeds (mm/min). VPanel sends 0xFFFF (max) for single-press steps;
+# for a meaningful slow/fast difference we use VPanel's continuous-ramp bounds.
+# RE: DAT_00440aa0=240 (ramp start), DAT_00440aac=8000 (XYZ ramp max).
+JOG_SPEED_SLOW =   240   # VPanel continuous jog ramp start (XYZ)
+JOG_SPEED_FAST = 0xFFFF  # VPanel single-press speed (firmware maximum)
 
 # Ping status bits (GET wValue=0x0001, 4-byte response)
 # Phase 1 (inner, dev_send_trigger_checked / FUN_0041b8d0): bit 22
