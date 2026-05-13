@@ -39,6 +39,7 @@ _PING_ERROR_MASK = 0x00100000   # bit 20
 # Decoded from VP_MDX40A.exe update_state_and_coords + wait_motion_complete_loop.
 # Byte ordering: Python struct '>I' gives the same value as the display.
 #
+#  bit 28  0x10000000  DOOR       enclosure door open (jog inhibited while set)
 #  bit 27  0x08000000  SPINDLE    spindle motor on  (fires RPM/speed update)
 #  bit 26  0x04000000  CMD_MOVE   motion command executing
 #  bit 25  0x02000000  MTR_PWR    motor powered / parking brake released
@@ -55,6 +56,7 @@ _PING_ERROR_MASK = 0x00100000   # bit 20
 #  bit  3  0x00000008  ]
 #  bit  2  0x00000004  ]
 
+FLAG_DOOR     = 0x10000000
 FLAG_SPINDLE  = 0x08000000
 FLAG_CMD_MOVE = 0x04000000
 FLAG_MTR_PWR  = 0x02000000
