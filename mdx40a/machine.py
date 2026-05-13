@@ -222,7 +222,9 @@ class MDX40A:
         The second uint16 field must be 0x0000 (0xFFFF is for wValue=0x4f7 which
         is the absolute-position form used only in multi-step milling sequences).
         """
-        payload = struct.pack('>HH4i', speed, 0x0000, x, y, z, a)
+        # Machine's internal wire axis order is A, X, Y, Z (empirically confirmed:
+        # field1→physical A, field2→physical X, field3→physical Y, field4→physical Z).
+        payload = struct.pack('>HH4i', speed, 0x0000, a, x, y, z)
         with self._usb_lock:
             _usb.vend_set(self._dev, 0x04f5, payload)
         log.debug("Jog cmd sent: %s", payload.hex())
