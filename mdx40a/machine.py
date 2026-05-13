@@ -240,6 +240,10 @@ class MDX40A:
         except usb.core.USBError:
             return -1
 
+    # How long to wait for the move bit to assert before deciding the command
+    # was a no-op (e.g. A-axis jog with no rotary table installed).
+    _MOTION_START_TIMEOUT = 0.500
+
     def _wait_motion_complete(self, timeout: float) -> bool:
         """
         Two-phase motion-complete wait matching VP_MDX40A.exe RE.
@@ -248,9 +252,10 @@ class MDX40A:
           Wait for ping bit 22 (0x400000) to set then clear — axis started moving
           and then velocity returned to zero.  Timeout ~3 s in firmware.
 
-        Phase 2 (outer, FUN_0040fa80 / FUN_00417b00):
+        Phase 2 (outer, jog_wait_busy_bits_clear @ 0x00417b00):
           Wait for bits 2 and 21 (0x00200004) both clear — firmware motion-complete.
           Two consecutive clear readings required.
+          VPanel only does this phase; Phase 1 is our addition for robustness.
 
         No motion-done ACK (SET 0x0004) is sent — that STALLs the real device.
         """
@@ -260,8 +265,12 @@ class MDX40A:
         ping = self._ping_status()
         log.info("Ping after jog cmd: 0x%08X  move_bit=%s", ping & 0xFFFFFFFF, bool(ping & _PING_MOVE_BIT))
 
-        # Wait for move bit to assert (axis has started)
+        # Wait for move bit to assert (axis has started), with a short start window.
+        # If movement doesn't begin within _MOTION_START_TIMEOUT and the machine is
+        # already idle (busy bits clear), the command was a no-op (e.g. A-axis with
+        # no rotary table) — return immediately rather than hanging for `timeout` s.
         move_seen = bool(ping & _PING_MOVE_BIT)
+        start_deadline = time.monotonic() + self._MOTION_START_TIMEOUT
         while not move_seen and time.monotonic() < deadline:
             time.sleep(0.050)
             ping = self._ping_status()
@@ -272,6 +281,10 @@ class MDX40A:
                 log.warning("Ping error bit in phase 1 (0x%08X)", ping)
                 return False
             move_seen = bool(ping & _PING_MOVE_BIT)
+            if not move_seen and time.monotonic() > start_deadline:
+                if not (ping & _PING_BUSY_MASK):
+                    log.info("No movement started and machine idle — jog was a no-op")
+                    return True
 
         if not move_seen:
             log.warning("Phase 1: move bit never asserted — jog may not have started")
