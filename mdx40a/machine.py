@@ -42,7 +42,7 @@ _PING_ERROR_MASK = 0x00100000   # bit 20
 #  bit 28  0x10000000  DOOR       enclosure door open (jog inhibited while set)
 #  bit 27  0x08000000  SPINDLE    spindle motor on  (fires RPM/speed update)
 #  bit 26  0x04000000  CMD_MOVE   motion command executing
-#  bit 25  0x02000000  MTR_PWR    motor powered / parking brake released
+#  bit 25  0x02000000  TOOLBUTTON using tool button on front pannel
 #  bit 22  0x00400000  MOVING     axis velocity > 0 (actually translating)
 #  18-16   0x00070000  STATE      machine state enum
 #                                   2 = idle / normal
@@ -59,13 +59,14 @@ _PING_ERROR_MASK = 0x00100000   # bit 20
 FLAG_DOOR     = 0x10000000
 FLAG_SPINDLE  = 0x08000000
 FLAG_CMD_MOVE = 0x04000000
-FLAG_MTR_PWR  = 0x02000000
+FLAG_TOOLBTN  = 0x02000000
 FLAG_MOVING   = 0x00400000
 FLAG_BUSY     = 0x00002000
 FLAG_ERROR    = 0x00001000
 FLAG_STATE    = 0x00070000
 FLAG_STATE_SHIFT = 16
 
+STATE_MAP = {0: 'init', 1: 'homing', 2: 'idle', 3: 'moving', 4: 'error'}
 
 @dataclass
 class MachineState:

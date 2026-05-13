@@ -29,9 +29,9 @@ from typing import List, Optional, Tuple
 
 from .. import machine as _machine
 from .. import trace as _trace
-from ..machine import (FLAG_DOOR, FLAG_SPINDLE, FLAG_CMD_MOVE, FLAG_MTR_PWR,
+from ..machine import (FLAG_DOOR, FLAG_SPINDLE, FLAG_CMD_MOVE, FLAG_TOOLBTN,
                        FLAG_MOVING, FLAG_BUSY, FLAG_ERROR,
-                       FLAG_STATE, FLAG_STATE_SHIFT)
+                       FLAG_STATE, FLAG_STATE_SHIFT, STATE_MAP)
 from . import log as _log
 
 # ── Jog parameters ────────────────────────────────────────────────────────────
@@ -297,14 +297,10 @@ class TUI:
         row += 1
         if row < height:
             state_num = (s.flags & _machine.FLAG_STATE) >> _machine.FLAG_STATE_SHIFT
-            STATE_NAMES = {2: 'idle', 3: 'motion-cmd'}
-            state_str = STATE_NAMES.get(state_num, f'#{state_num}')
-            status = "MOVING" if self._moving else ("READY" if s.ready else "INIT…")
-            status_attr = (CP(_CP_MOVING) | BOLD) if self._moving else (CP(_CP_STATUS) | BOLD)
-            self._put(win, row, 2, f'state  {state_str:<12}  status ', CP(_CP_LABEL))
-            self._put(win, row, 34, status, status_attr)
+            state_str = STATE_MAP.get(state_num, f'#{state_num}')
+            self._put(win, row, 2, f'state  {state_str:<12} ', CP(_CP_LABEL))
 
-        # Row: spindle rotation time
+        # Row: spindle speed + on/off
         row += 1
         if row < height:
             secs = self._spindle_secs
@@ -338,7 +334,7 @@ class TUI:
         BITS = [
             (FLAG_DOOR,     'DOOR',     _CP_LOG_ERR, _CP_LOG_INFO),
             (FLAG_SPINDLE,  'SPINDLE',  _CP_STATUS,  _CP_LOG_INFO),
-            (FLAG_MTR_PWR,  'MTR_PWR',  _CP_MOVING,  _CP_LOG_INFO),
+            (FLAG_TOOLBTN,  'TOOLBTN',  _CP_MOVING,  _CP_LOG_INFO),
             (FLAG_CMD_MOVE, 'CMD_MOVE', _CP_MOVING,  _CP_LOG_INFO),
             (FLAG_MOVING,   'MOVING',   _CP_MOVING,  _CP_LOG_INFO),
             (FLAG_BUSY,     'BUSY',     _CP_MOVING,  _CP_LOG_INFO),
