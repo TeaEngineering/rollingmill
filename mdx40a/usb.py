@@ -47,13 +47,24 @@ def release(dev, intf_num):
         pass
 
 
-def vend_set(dev, wValue, data=b'', timeout=2000):
-    """Vendor control OUT (VEND_SET_CMD). data=b'' for a bare trigger."""
+def vend_set(dev, wValue: int, data: bytes=b'', timeout=2000):
+    """Vendor control OUT (VEND_SET_CMD). data=b'' for a bare trigger.
+
+    RE: deviceioctl_write_short/long — RD25D driver always prepends a 4-byte
+    header to the USB data stage: [bRequest=0x01, wValue_hi, wValue_lo, 0x00].
+    For the long path (>= 3 bytes) the driver builds this from the 3-byte IOCTL
+    InBuffer + a padding byte; for the short path it is embedded in InBuffer
+    directly (nInBufferSize = nBytes + 4).  Either way the device sees:
+        [0x01, wValue_hi, wValue_lo, 0x00] + payload
+    Trace logging records the logical payload (without header).
+    """
     t = _trace.get_active()
+    header = bytes([0x01, (wValue >> 8) & 0xFF, wValue & 0xFF, 0x00])
+    wire_data = header + data
     try:
-        result = dev.ctrl_transfer(_T_SET, _BREQUEST, wValue, _WINDEX, data, timeout=timeout)
+        result = dev.ctrl_transfer(_T_SET, _BREQUEST, wValue, _WINDEX, wire_data, timeout=timeout)
         if t:
-            t.log_set(wValue, bytes(data))
+            t.log_set(wValue, data)
         return result
     except Exception as exc:
         if t:
@@ -79,6 +90,27 @@ def trigger_read(dev, trig_wvalue, length, timeout=2000):
     """Pattern B: SET trigger wValue to prime device, then GET wValue=0x0003."""
     vend_set(dev, trig_wvalue, timeout=timeout)
     return vend_get(dev, 0x0003, length, timeout=timeout)
+
+
+def trigger_read_b(dev, wValue, max_length, poll_timeout=0.200, timeout=2000):
+    """Pattern B with ping polling (RE: dev_trigger_read @ 0x0041bb90).
+
+    SET wValue → poll GET 0x0001 until ping[3] (C LE *uint32 >> 24) is non-zero
+    (= firmware-reported response length) → GET 0x0003 of that many bytes.
+    Returns bytes on success, None on timeout or device error.
+    """
+    vend_set(dev, wValue, b'', timeout=timeout)
+    deadline = time.monotonic() + poll_timeout
+    while time.monotonic() < deadline:
+        ping = vend_get(dev, 0x0001, 4, timeout=timeout)
+        if len(ping) >= 4:
+            if ping[2] & 0x10:      # bit 20 = device error
+                return None
+            length = ping[3]        # C LE high byte = response length
+            if length:
+                return vend_get(dev, 0x0003, min(int(length), max_length), timeout=timeout)
+        time.sleep(0.005)
+    return None
 
 
 def bulk_write(dev, data, timeout=2000):

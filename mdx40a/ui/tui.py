@@ -11,9 +11,10 @@ Keybindings:
   a / z      Z axis  +/−  (a raises, z lowers)
   [/]        A axis  −/+
   f          toggle fast / slow jog speed
-  1/2/3/4    step size: 0.01 / 0.1 / 1.0 / 10.0 mm
+  1/2/3/4/5  XYZ step: 0.01/0.1/1.0/10.0/50.0 mm  A step: 0.01/0.1/1.0/10.0/90.0°
   s          spindle on / off (toggle)
-  < / >      spindle speed −10% / +10%
+  < / >      spindle target RPM  −500 / +500
+  - / +      spindle & feed override %  −10 / +10
   q / ESC    quit
 
 Run: sudo python3 -m mdx40a.ui.tui [-v|-vv]
@@ -36,8 +37,8 @@ from . import log as _log
 
 # ── Jog parameters ────────────────────────────────────────────────────────────
 
-STEPS        = [0.01, 0.1, 1.0, 10.0]
-STEP_LABELS  = ['0.01', '0.1', '1.0', '10.0']
+STEPS_LINEAR = [0.01, 0.1, 1.0, 10.0, 50.0]   # XYZ jog distances (mm)
+STEPS_ROTARY = [0.01, 0.1, 1.0, 10.0, 90.0]   # A jog distances (degrees)
 
 # ── Colour pair IDs ───────────────────────────────────────────────────────────
 
@@ -88,12 +89,11 @@ class TUI:
     def __init__(self, machine: _machine.MDX40A, log_buf: _LogBuffer):
         self._m            = machine
         self._log          = log_buf
-        self._step_i       = 2           # index into STEPS (default 1.0 mm)
+        self._step_i       = 2           # index into STEPS_LINEAR / STEPS_ROTARY (default 1.0mm / 1.0°)
         self._fast         = False
         self._moving       : Optional[str]             = None   # axis currently jogging
         self._jog_thr      : Optional[threading.Thread] = None
         self._quit         = threading.Event()
-        self._spindle_secs : Optional[int]             = None   # cached from GET 0x2405
 
     # ── Entry point ───────────────────────────────────────────────────────────
 
@@ -102,9 +102,6 @@ class TUI:
         curses.curs_set(0)
         stdscr.nodelay(True)
         stdscr.timeout(100)     # getch() returns every 100 ms so the screen refreshes
-
-        threading.Thread(target=self._spindle_poll_loop, daemon=True,
-                         name='spindle-poll').start()
 
         while not self._quit.is_set():
             try:
@@ -171,36 +168,35 @@ class TUI:
             t = _trace.get_active()
             if t:
                 t.annotate(f"KEY f  speed={'FAST' if self._fast else 'slow'}")
-        elif key == ord('1'):
-            self._step_i = 0
+        elif key in (ord('1'), ord('2'), ord('3'), ord('4'), ord('5')):
+            self._step_i = key - ord('1')
+            lin = STEPS_LINEAR[self._step_i]
+            rot = STEPS_ROTARY[self._step_i]
             t = _trace.get_active()
             if t:
-                t.annotate(f"KEY 1  step=0.01mm")
-        elif key == ord('2'):
-            self._step_i = 1
-            t = _trace.get_active()
-            if t:
-                t.annotate(f"KEY 2  step=0.1mm")
-        elif key == ord('3'):
-            self._step_i = 2
-            t = _trace.get_active()
-            if t:
-                t.annotate(f"KEY 3  step=1.0mm")
-        elif key == ord('4'):
-            self._step_i = 3
-            t = _trace.get_active()
-            if t:
-                t.annotate(f"KEY 4  step=10.0mm")
+                t.annotate(f"KEY {chr(key)}  step={lin}mm/{rot}°")
+        elif key in (ord('s'), ord('S')):
+            self._toggle_spindle()
+        elif key == ord('<'):
+            self._adjust_spindle_rpm(-500)
+        elif key == ord('>'):
+            self._adjust_spindle_rpm(+500)
+        elif key in (ord('-'), ord('_')):
+            self._adjust_overrides(-10)
+        elif key in (ord('+'), ord('=')):
+            self._adjust_overrides(+10)
 
     def _start_jog(self, axis: str, sign: int) -> None:
         if self._jog_thr and self._jog_thr.is_alive():
             return  # previous jog still settling — ignore
-        dist  = sign * STEPS[self._step_i]
+        step  = STEPS_ROTARY[self._step_i] if axis == 'A' else STEPS_LINEAR[self._step_i]
+        dist  = sign * step
         speed = _machine.JOG_SPEED_FAST if self._fast else _machine.JOG_SPEED_SLOW
 
         t = _trace.get_active()
         if t:
-            t.annotate(f"JOG {axis} {dist:+.3f}mm  speed={speed}  cmd=0x4f5/displacement")
+            unit = '°' if axis == 'A' else 'mm'
+            t.annotate(f"JOG {axis} {dist:+.3f}{unit}  speed={speed}  cmd=0x4f5/displacement")
 
         log = logging.getLogger('tui')
 
@@ -216,17 +212,36 @@ class TUI:
         self._jog_thr = threading.Thread(target=_run, daemon=True, name='jog')
         self._jog_thr.start()
 
-    def _spindle_poll_loop(self) -> None:
-        """Read spindle time every 30 s and cache it for display."""
-        while not self._quit.is_set():
-            try:
-                # secs = self._m.get_spindle_time()
-                secs = 0
-                if secs is not None:
-                    self._spindle_secs = secs
-            except Exception:
-                pass
-            self._quit.wait(30.0)
+    def _toggle_spindle(self) -> None:
+        s = self._m.state
+        if s.flags & FLAG_SPINDLE:
+            self._m.spindle_off()
+        else:
+            self._m.spindle_on(self._m.spindle_speed_pct)
+
+    def _adjust_spindle_rpm(self, delta: int) -> None:
+        """Adjust configured spindle target RPM via SET 0x3901 (<> keys)."""
+        new_rpm = self._m.spindle_target_rpm + delta
+        t = _trace.get_active()
+        if t:
+            t.annotate(f"KEY <>  spindle_target_rpm={new_rpm}")
+        threading.Thread(
+            target=self._m.set_spindle_rpm, args=(new_rpm,),
+            daemon=True, name='rpm-set',
+        ).start()
+
+    def _adjust_overrides(self, delta: int) -> None:
+        """Adjust spindle speed % and cutting feed % together (+/- keys)."""
+        pct = max(10, min(200, self._m.spindle_speed_pct + delta))
+        s = self._m.state
+        if s.flags & FLAG_SPINDLE:
+            self._m.set_spindle_speed(pct)
+        else:
+            self._m.set_spindle_speed_cached(pct)
+        self._m.set_cutting_feed(pct)
+        t = _trace.get_active()
+        if t:
+            t.annotate(f"KEY +-  override_pct={pct}")
 
     # ── Drawing ───────────────────────────────────────────────────────────────
 
@@ -256,8 +271,9 @@ class TUI:
 
         # Row 0 — title bar
         speed_lbl = "FAST" if self._fast else "slow"
-        step_lbl  = STEPS[self._step_i]
-        title     = f" Roland MDX-40A  │  {speed_lbl}  │  step {step_lbl} mm "
+        lin_lbl   = STEPS_LINEAR[self._step_i]
+        rot_lbl   = STEPS_ROTARY[self._step_i]
+        title     = f" Roland MDX-40A  │  {speed_lbl}  │  XYZ {lin_lbl}mm  A {rot_lbl}° "
         self._put(win, 0, 0, title.ljust(cols), CP(_CP_HEADER) | BOLD)
 
         if height < 3:
@@ -301,23 +317,35 @@ class TUI:
             self._put(win, row, 2, f'state  {state_str:<12} ', CP(_CP_LABEL))
 
         # Row: spindle speed + on/off
+        # Layout: spindle  OFF  tgt  9000  ×100% =  9000 RPM  feed 100%  runtime Xh XXm
+        #         RE: actual_rpm = MulDiv(target_rpm, pct, 100) @ update_state_and_coords
+        #         <> keys set target RPM (SET 0x3901); +- keys set both override %s together
         row += 1
         if row < height:
-            secs = self._spindle_secs
+            spindle_on  = bool(s.flags & FLAG_SPINDLE)
+            spd_pct     = self._m.spindle_speed_pct
+            feed_pct    = self._m.cutting_feed_pct
+            tgt_rpm     = self._m.spindle_target_rpm
+            actual_rpm  = tgt_rpm * spd_pct // 100
+            state_str   = 'ON ' if spindle_on else 'off'
+            state_attr  = (CP(_CP_STATUS) | BOLD) if spindle_on else CP(_CP_LABEL)
+            self._put(win, row,  2, 'spindle', CP(_CP_LABEL))
+            self._put(win, row, 10, state_str, state_attr)
+            self._put(win, row, 14, f'tgt {tgt_rpm:5d}', CP(_CP_VALUE))
+            self._put(win, row, 24, f'×{spd_pct:3d}% = {actual_rpm:5d} RPM',
+                      CP(_CP_VALUE) | BOLD)
+            self._put(win, row, 43, f'feed {feed_pct:3d}%', CP(_CP_LABEL))
+            secs = self._m.spindle_secs
             if secs is not None:
-                h, m = _machine.MDX40A.spindle_hours_minutes(secs)
-                self._put(win, row, 2, 'spindle', CP(_CP_LABEL))
-                self._put(win, row, 10, f'{h}h {m:02d}m', CP(_CP_VALUE) | BOLD)
-            else:
-                self._put(win, row, 2, 'spindle', CP(_CP_LABEL))
-                self._put(win, row, 10, '---', CP(_CP_LABEL))
+                h, m = secs // 3600, (secs % 3600) // 60
+                self._put(win, row, 53, f'runtime {h}h {m:02d}m', CP(_CP_LABEL))
 
         # Rows: key reference (near bottom of state pane)
         ref_row = height - 2
         if ref_row > row + 1:
             key_lines = [
                 '  ←→ X   ↑↓ Y   a/z Z   [] A',
-                '  f fast/slow   1/2/3/4 step   s spindle on/off   <> speed   q quit',
+                '  f fast/slow   1-5 step   s spindle   <> target RPM   -/+ overrides%   q quit',
             ]
             for i, line in enumerate(key_lines):
                 r = ref_row + i
