@@ -13,8 +13,11 @@ Keybindings:
   f          toggle fast / slow jog speed
   1/2/3/4/5  XYZ step: 0.01/0.1/1.0/10.0/50.0 mm  A step: 0.01/0.1/1.0/10.0/90.0°
   s          spindle on / off (toggle)
+  d          A-axis rotary drilling on / off (toggle; Drill Workpiece dialog)
   < / >      spindle target RPM  −500 / +500
   - / +      spindle & feed override %  −10 / +10
+  w          open WCS dialog (activate / move-to / overwrite coordinate systems)
+  c          enter target position numerically and move there
   q / ESC    quit
 
 Run: sudo python3 -m mdx40a.ui.tui [-v|-vv]
@@ -53,6 +56,8 @@ _CP_LOG_DBG  = 8
 _CP_LOG_INFO = 9
 _CP_LOG_WARN = 10
 _CP_LOG_ERR  = 11
+_CP_ACTIVE   = 12   # active / selected row in WCS dialog
+_CP_DIM      = 13   # dimmed / unavailable
 
 
 # ── Curses log handler ────────────────────────────────────────────────────────
@@ -94,6 +99,13 @@ class TUI:
         self._moving       : Optional[str]             = None   # axis currently jogging
         self._jog_thr      : Optional[threading.Thread] = None
         self._quit         = threading.Event()
+        # WCS overlay dialog state
+        self._wcs_open           = False
+        self._wcs_sel            = 0        # selected row: 0=MCS, 1-10=WCS1-10
+        self._wcs_data           : Optional[list] = None   # list[11] of (x,y,z,a)|None
+        self._wcs_loading        = False
+        self._coord_entry_pending = False   # set by 'c' key; consumed in run loop
+        self._drill_active        = False   # A-axis rotary drill mode (SET 0x3809)
 
     # ── Entry point ───────────────────────────────────────────────────────────
 
@@ -113,6 +125,11 @@ class TUI:
                 stdscr.clear()
             elif key != -1:
                 self._handle_key(key)
+
+            if self._coord_entry_pending:
+                self._coord_entry_pending = False
+                self._coord_entry_dialog(stdscr)
+                stdscr.clear()
 
             self._draw(stdscr)
 
@@ -136,10 +153,17 @@ class TUI:
         P(_CP_LOG_INFO, curses.COLOR_WHITE,  -1)
         P(_CP_LOG_WARN, curses.COLOR_YELLOW, -1)
         P(_CP_LOG_ERR,  curses.COLOR_RED,    -1)
+        P(_CP_ACTIVE,   curses.COLOR_BLACK,  curses.COLOR_WHITE)
+        P(_CP_DIM,      curses.COLOR_WHITE,  -1)
 
     # ── Input ─────────────────────────────────────────────────────────────────
 
     def _handle_key(self, key: int) -> None:
+        # WCS dialog swallows all keys while open
+        if self._wcs_open:
+            self._wcs_handle_key(key)
+            return
+
         if key in (ord('q'), ord('Q'), 27):
             if self._moving:
                 self._m.stop_motion()
@@ -185,6 +209,12 @@ class TUI:
             self._adjust_overrides(-10)
         elif key in (ord('+'), ord('=')):
             self._adjust_overrides(+10)
+        elif key in (ord('d'), ord('D')):
+            self._toggle_drill_mode()
+        elif key in (ord('w'), ord('W')):
+            self._wcs_open_dialog()
+        elif key in (ord('c'), ord('C')):
+            self._coord_entry_pending = True   # signal draw loop to run modal entry
 
     def _start_jog(self, axis: str, sign: int) -> None:
         if self._jog_thr and self._jog_thr.is_alive():
@@ -217,7 +247,12 @@ class TUI:
         if s.flags & FLAG_SPINDLE:
             self._m.spindle_off()
         else:
-            self._m.spindle_on(self._m.spindle_speed_pct)
+            self._m.spindle_on()
+
+    def _toggle_drill_mode(self) -> None:
+        """Toggle A-axis rotary drill mode (Drill Workpiece dialog → SET 0x3809)."""
+        self._drill_active = not self._drill_active
+        self._m.rotary_drill_mode(self._drill_active)
 
     def _adjust_spindle_rpm(self, delta: int) -> None:
         """Adjust configured spindle target RPM via SET 0x3901 (<> keys)."""
@@ -225,10 +260,7 @@ class TUI:
         t = _trace.get_active()
         if t:
             t.annotate(f"KEY <>  spindle_target_rpm={new_rpm}")
-        threading.Thread(
-            target=self._m.set_spindle_rpm, args=(new_rpm,),
-            daemon=True, name='rpm-set',
-        ).start()
+        self._m.set_spindle_rpm(new_rpm)
 
     def _adjust_overrides(self, delta: int) -> None:
         """Adjust spindle speed % and cutting feed % together (+/- keys)."""
@@ -264,6 +296,9 @@ class TUI:
         except curses.error:
             pass
 
+        if self._wcs_open:
+            self._draw_wcs_dialog(stdscr, rows, cols)
+
     def _draw_state(self, win: curses.window, height: int, cols: int) -> None:
         s     = self._m.state
         CP    = curses.color_pair
@@ -273,19 +308,21 @@ class TUI:
         speed_lbl = "FAST" if self._fast else "slow"
         lin_lbl   = STEPS_LINEAR[self._step_i]
         rot_lbl   = STEPS_ROTARY[self._step_i]
-        title     = f" Roland MDX-40A  │  {speed_lbl}  │  XYZ {lin_lbl}mm  A {rot_lbl}° "
+        wcs_lbl   = 'MCS' if self._m.active_wcs == 0 else f'WCS{self._m.active_wcs}'
+        title     = f" Roland MDX-40A  │  {speed_lbl}  │  XYZ {lin_lbl}mm  A {rot_lbl}°  │  {wcs_lbl} "
         self._put(win, 0, 0, title.ljust(cols), CP(_CP_HEADER) | BOLD)
 
         if height < 3:
             return
 
-        # Rows 2-5 — coordinate pairs, two per row
+        # Rows 2-5 — coordinate pairs, two per row (WCS-relative when WCS active)
         row = 2
+        dx, dy, dz, da = self._display_xyza(s)
         axes = [
-            ('X', s.x_mm,  'mm'),
-            ('Y', s.y_mm,  'mm'),
-            ('Z', s.z_mm,  'mm'),
-            ('A', s.a_deg, '° '),
+            ('X', dx, 'mm'),
+            ('Y', dy, 'mm'),
+            ('Z', dz, 'mm'),
+            ('A', da, '° '),
         ]
         for i in range(0, 4, 2):
             if row >= height:
@@ -335,17 +372,19 @@ class TUI:
             self._put(win, row, 24, f'×{spd_pct:3d}% = {actual_rpm:5d} RPM',
                       CP(_CP_VALUE) | BOLD)
             self._put(win, row, 43, f'feed {feed_pct:3d}%', CP(_CP_LABEL))
+            if self._drill_active:
+                self._put(win, row, 55, 'DRILL', CP(_CP_LOG_WARN) | BOLD)
             secs = self._m.spindle_secs
             if secs is not None:
                 h, m = secs // 3600, (secs % 3600) // 60
-                self._put(win, row, 53, f'runtime {h}h {m:02d}m', CP(_CP_LABEL))
+                self._put(win, row, 62, f'runtime {h}h {m:02d}m', CP(_CP_LABEL))
 
         # Rows: key reference (near bottom of state pane)
         ref_row = height - 2
         if ref_row > row + 1:
             key_lines = [
                 '  ←→ X   ↑↓ Y   a/z Z   [] A',
-                '  f fast/slow   1-5 step   s spindle   <> target RPM   -/+ overrides%   q quit',
+                '  f fast/slow   1-5 step   s spindle   d A-drill   <> RPM   -/+ override%   w coords   c move-to   q quit',
             ]
             for i, line in enumerate(key_lines):
                 r = ref_row + i
@@ -383,6 +422,221 @@ class TUI:
             if x >= cols - 2:
                 break
 
+    # ── WCS helpers ───────────────────────────────────────────────────────────
+
+    def _display_xyza(self, s: _machine.MachineState) -> tuple:
+        """Subtract active WCS origin from machine coords for display."""
+        ox, oy, oz, oa = self._m.wcs_offset
+        return (s.x_mm - ox, s.y_mm - oy, s.z_mm - oz, (s.a_deg - oa) % 360.0)
+
+    def _wcs_open_dialog(self) -> None:
+        self._wcs_open    = True
+        self._wcs_sel     = self._m.active_wcs   # start cursor on active slot
+        self._wcs_data    = None
+        self._wcs_loading = True
+        self._wcs_load()
+
+    def _wcs_load(self) -> None:
+        data = [(0.0, 0.0, 0.0, 0.0)]   # index 0 = MCS always zero
+        for slot in range(1, 11):
+            data.append(self._m.get_wcs_origin(slot))
+        self._wcs_data    = data
+        self._wcs_loading = False
+
+    def _wcs_handle_key(self, key: int) -> None:
+        if key in (27, ord('q'), ord('Q')):       # Esc / q — close
+            self._wcs_open = False
+            return
+        if key == curses.KEY_UP:
+            self._wcs_sel = max(0, self._wcs_sel - 1)
+        elif key == curses.KEY_DOWN:
+            self._wcs_sel = min(10, self._wcs_sel + 1)
+        elif key in (ord('a'), ord('A')):         # Activate
+            self._m.set_active_wcs(self._wcs_sel)
+        elif key in (ord('m'), ord('M'), 10, 13): # Move to stored origin
+            if self._wcs_sel == 0:
+                return   # MCS origin is always (0,0,0,0) — no-op / already there
+            if self._wcs_data and self._wcs_data[self._wcs_sel]:
+                ox, oy, oz, oa = self._wcs_data[self._wcs_sel]
+                self._m.move_to_machine_pos(ox, oy, oz, oa)
+        elif key in (ord('o'), ord('O')):         # Overwrite with current position
+            if self._wcs_sel == 0:
+                return   # cannot overwrite MCS
+            slot = self._wcs_sel
+            self._m.capture_origin(slot)
+            if self._wcs_data:
+                self._wcs_data[slot] = self._m.get_wcs_origin(slot)
+        elif key in (ord('r'), ord('R')):         # Reload all origins from device
+            self._wcs_data    = None
+            self._wcs_loading = True
+            self._wcs_load()
+
+    def _draw_wcs_dialog(self, stdscr: curses.window, rows: int, cols: int) -> None:
+        CP   = curses.color_pair
+        BOLD = curses.A_BOLD
+
+        dh = min(18, rows - 2)
+        dw = min(76, cols - 2)
+        dy = (rows - dh) // 2
+        dx = (cols - dw) // 2
+
+        try:
+            win = curses.newwin(dh, dw, dy, dx)
+        except curses.error:
+            return
+
+        win.erase()
+        win.box()
+
+        # Title row
+        loading = '  loading…' if self._wcs_loading else ''
+        title = f' Coordinate Systems{loading}'
+        win.addstr(0, 2, title[:dw - 4], CP(_CP_HEADER) | BOLD)
+
+        if dh < 5:
+            win.refresh()
+            return
+
+        # Column headers
+        hdr = f"{'':4s}  {'X (mm)':>12s}  {'Y (mm)':>12s}  {'Z (mm)':>12s}  {'A (°)':>10s}"
+        win.addstr(1, 1, hdr[:dw - 2], CP(_CP_LABEL))
+        win.addstr(2, 1, '─' * (dw - 2), CP(_CP_LABEL))
+
+        # Data rows: 0=MCS, 1-10=WCS1-10
+        for i in range(min(11, dh - 5)):
+            row = 3 + i
+            if row >= dh - 2:
+                break
+            label   = 'MCS ' if i == 0 else f'WC{i:<2d}'
+            is_active   = (i == self._m.active_wcs)
+            is_selected = (i == self._wcs_sel)
+
+            if self._wcs_data and self._wcs_data[i] is not None:
+                x, y, z, a = self._wcs_data[i]
+                vals = f'{x:>+12.3f}  {y:>+12.3f}  {z:>+12.3f}  {a:>+10.3f}'
+            elif self._wcs_loading:
+                vals = f'{"…":>12s}  {"…":>12s}  {"…":>12s}  {"…":>10s}'
+            else:
+                vals = f'{"?":>12s}  {"?":>12s}  {"?":>12s}  {"?":>10s}'
+
+            suffix = ' ACT' if is_active else '    '
+            line   = f' {label} {vals} {suffix}'
+
+            if is_selected:
+                attr = CP(_CP_ACTIVE) | BOLD
+            elif is_active:
+                attr = CP(_CP_STATUS) | BOLD
+            else:
+                attr = CP(_CP_VALUE)
+
+            try:
+                win.addstr(row, 1, line[:dw - 2], attr)
+            except curses.error:
+                pass
+
+        # Key reference
+        ref_row = dh - 2
+        keys = ' ↑↓ navigate   A activate   M move to   O overwrite   R reload   Esc close'
+        win.addstr(ref_row, 1, '─' * (dw - 2), CP(_CP_LABEL))
+        win.addstr(ref_row + 1, 1, keys[:dw - 2], CP(_CP_KEYS))
+
+        win.refresh()
+
+    # ── Coordinate entry dialog (blocking, 'c' key) ───────────────────────────
+
+    def _coord_entry_dialog(self, stdscr: curses.window) -> None:
+        """Modal dialog: user types XYZA target in active CS, machine moves there."""
+        s  = self._m.state
+        dx, dy, dz, da = self._display_xyza(s)
+        rows, cols = stdscr.getmaxyx()
+
+        dh, dw = 13, 52
+        wy = max(0, (rows - dh) // 2)
+        wx = max(0, (cols - dw) // 2)
+
+        try:
+            win = curses.newwin(dh, dw, wy, wx)
+        except curses.error:
+            return
+
+        CP   = curses.color_pair
+        BOLD = curses.A_BOLD
+        wcs_lbl = 'MCS' if self._m.active_wcs == 0 else f'WCS{self._m.active_wcs}'
+
+        win.erase()
+        win.box()
+        win.addstr(0, 2, f' Move to position ({wcs_lbl}) '[:dw - 4],
+                   CP(_CP_HEADER) | BOLD)
+        win.addstr(1, 2, 'Leave blank to keep current value.', CP(_CP_LABEL))
+        win.addstr(2, 2, '─' * (dw - 4), CP(_CP_LABEL))
+        win.addstr(9, 2, '─' * (dw - 4), CP(_CP_LABEL))
+        win.addstr(10, 2, '[Enter] move    [Esc] cancel', CP(_CP_KEYS))
+
+        # Switch to blocking echo mode for text entry
+        curses.echo()
+        curses.curs_set(1)
+        win.nodelay(False)
+        win.keypad(True)
+
+        axes_info = [
+            ('X', dx, 'mm'),
+            ('Y', dy, 'mm'),
+            ('Z', dz, 'mm'),
+            ('A', da, '° '),
+        ]
+        entered: list = [None, None, None, None]
+        cancelled = False
+
+        try:
+            for i, (axis, cur, unit) in enumerate(axes_info):
+                row = 3 + i * 1 + i   # rows 3, 5, 7 — but let's do 3,4,5,6
+                row = 3 + i
+                prompt = f'  {axis} ({unit})  current {cur:>+10.3f}  → '
+                win.addstr(row, 1, prompt[:dw - 2], CP(_CP_LABEL))
+                win.refresh()
+                # input field at end of prompt
+                inp_x = 1 + len(prompt)
+                inp_x = min(inp_x, dw - 10)
+                try:
+                    raw = win.getstr(row, inp_x, 8).decode('ascii', errors='ignore').strip()
+                except curses.error:
+                    raw = ''
+                # ESC check: getstr can't detect ESC mid-string; we allow blank=keep
+                if raw:
+                    try:
+                        entered[i] = float(raw)
+                    except ValueError:
+                        win.addstr(row, inp_x + 9, ' ?bad', CP(_CP_LOG_WARN))
+                        win.refresh()
+        except KeyboardInterrupt:
+            cancelled = True
+        finally:
+            curses.noecho()
+            curses.curs_set(0)
+
+        if cancelled:
+            return
+
+        # Fill blanks with current display values
+        final_display = [
+            entered[0] if entered[0] is not None else dx,
+            entered[1] if entered[1] is not None else dy,
+            entered[2] if entered[2] is not None else dz,
+            entered[3] if entered[3] is not None else da,
+        ]
+
+        # Convert WCS-relative display coords back to machine coords
+        ox, oy, oz, oa = self._m.wcs_offset
+        mx = final_display[0] + ox
+        my = final_display[1] + oy
+        mz = final_display[2] + oz
+        ma = final_display[3] + oa
+
+        threading.Thread(
+            target=self._m.move_to_machine_pos, args=(mx, my, mz, ma),
+            daemon=True, name='coord-move',
+        ).start()
+
     def _draw_separator(self, win: curses.window, row: int, cols: int) -> None:
         rows, _ = win.getmaxyx()
         if row >= rows:
@@ -397,7 +651,7 @@ class TUI:
         # Pin most-recent line to bottom
         screen_row = start + max(0, height - len(lines))
         for level, text in lines:
-            if screen_row >= rows - 1:
+            if screen_row >= rows:
                 break
             if level >= logging.ERROR:
                 attr = curses.color_pair(_CP_LOG_ERR)

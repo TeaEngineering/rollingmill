@@ -33,6 +33,26 @@ JOG_SPEED_FAST = 0xFFFF  # VPanel single-press speed (firmware maximum)
 SPINDLE_RPM_MIN =  4500
 SPINDLE_RPM_MAX = 15000
 
+# WCS slot Pattern B read wValues (slots 1-10, 0-indexed in tuple)
+# RE: query_coord_system_by_index @ 0x00403910 → GET wValue returns 4×uint32 XYZA
+_WCS_READ_WVAL = (
+    0x030b,                              # WCS1
+    0x3202,                              # WCS2
+    0x3203, 0x3204, 0x3205,             # WCS3-5
+    0x3206, 0x3207, 0x3208,             # WCS6-8
+    0x3209, 0x320a,                      # WCS9-10
+)
+
+# WCS slot explicit write wValues (slots 1-10, 0-indexed in tuple)
+# RE: FUN_00403a40, called from Detect Jig and origin-set sequences
+_WCS_WRITE_WVAL = (
+    0x030c,                              # WCS1
+    0x3335,                              # WCS2
+    0x3336, 0x3337, 0x3338,             # WCS3-5
+    0x3339, 0x333a, 0x333b,             # WCS6-8
+    0x333c, 0x333d,                      # WCS9-10
+)
+
 # Ping status bits (GET wValue=0x0001, 4-byte response, little-endian uint32)
 # RE: jog_wait_busy_bits_clear @ 0x00417b00, wait_move_bit_clear @ 0x0041b8d0
 _PING_BUSY_MASK  = 0x00200004   # bits 21 and 2 — firmware busy (jog motion-complete gate)
@@ -132,6 +152,8 @@ class MDX40A:
         self._cutting_feed_pct: int = 100    # cached cutting feed override %
         self._spindle_target_rpm: int = SPINDLE_RPM_MIN  # configured target RPM (GET/SET 0x3900/0x3901)
         self._spindle_secs: Optional[int] = None
+        self._active_wcs: int   = 0                      # 0=MCS, 1-10=WCS1-WCS10
+        self._wcs_offset: tuple = (0.0, 0.0, 0.0, 0.0)  # machine coords of active WCS origin (mm/deg)
 
     # ── Connection lifecycle ──────────────────────────────────────────────────
 
@@ -289,23 +311,10 @@ class MDX40A:
             now_clear = (ping & _PING_BUSY_MASK) == 0
             if now_clear and last_clear:
                 log.debug("Motion complete")
-                self._send_motion_done_ack()
                 return True
             last_clear = now_clear
         log.warning("Motion wait timed out after %.1f s", timeout)
         return False
-
-    def _send_motion_done_ack(self) -> None:
-        """Motion-complete acknowledgement (RE: RolandDeviceSession__send_motion_done_ack).
-
-        VPanel calls this immediately after jog_wait_busy_bits_clear exits.
-        """
-        try:
-            with self._usb_lock:
-                _usb.vend_set(self._dev, 0x0004)
-            log.debug("Motion done ack sent (SET 0x0004)")
-        except usb.core.USBError as e:
-            log.debug("Motion done ack failed (may be harmless): %s", e)
 
     def stop_motion(self) -> None:
         """Send immediate motion stop (SET wValue=0x03f3)."""
@@ -363,34 +372,41 @@ class MDX40A:
         except usb.core.USBError as e:
             log.warning("set_spindle_rpm failed: %s", e)
 
-    def spindle_on(self, pct: Optional[int] = None) -> None:
-        """Start spindle at given speed % (10–200).
-
-        RE: send_spindle_speed_0x3008 @ 0041a320.  SET 0x3008 with 1-byte speed
-        starts the motor (or updates speed if already running).
-        """
-        if pct is None:
-            pct = self._spindle_speed_pct
-        pct = max(10, min(200, int(pct)))
-        self._spindle_speed_pct = pct
+    def spindle_on(self) -> None:
+        """Start spindle motor (RE: main panel Start/Stop Spindle button → SET 0x03f0 bare trigger)."""
         try:
             with self._usb_lock:
-                _usb.vend_set(self._dev, 0x3008, bytes([pct]))
-            log.info("Spindle on at %d%%", pct)
+                _usb.vend_set(self._dev, 0x03f0)
+            log.info("Spindle on (SET 0x03f0)")
         except usb.core.USBError as e:
             log.warning("spindle_on failed: %s", e)
 
     def spindle_off(self) -> None:
-        """Stop the spindle.
-
-        RE: send_spindle_stop_0x3009 @ 0041a340.  Bare trigger, no payload.
-        """
+        """Stop spindle motor (RE: main panel Start/Stop Spindle button → SET 0x03f1 bare trigger)."""
         try:
             with self._usb_lock:
-                _usb.vend_set(self._dev, 0x3009)
-            log.info("Spindle off (SET 0x3009)")
+                _usb.vend_set(self._dev, 0x03f1)
+            log.info("Spindle off (SET 0x03f1)")
         except usb.core.USBError as e:
             log.warning("spindle_off failed: %s", e)
+
+    def rotary_drill_mode(self, enabled: bool) -> None:
+        """A-axis continuous low-speed rotation for center drilling with tailstock.
+
+        RE: [Drill Workpiece] dialog Rotate/Stop buttons (0xffe/0xfff) → FUN_004027a0 /
+        FUN_00402840 → FUN_0041b1d0 → SET 0x3809 [1, 0xFFFF] (rotate) / [0, 0] (stop).
+        The A-axis spins continuously at low speed; the operator uses a hand-held drill
+        to bore a center hole for tailstock support.
+        """
+        payload = struct.pack('<HH', 1, 0xFFFF) if enabled else struct.pack('<HH', 0, 0)
+        try:
+            with self._usb_lock:
+                _usb.vend_set(self._dev, 0x3809, payload)
+            log.info("Rotary drill mode %s (SET 0x3809 %s)",
+                     "ON" if enabled else "OFF",
+                     "[1, 0xFFFF]" if enabled else "[0, 0]")
+        except usb.core.USBError as e:
+            log.warning("rotary_drill_mode failed: %s", e)
 
     def set_spindle_speed(self, pct: int) -> None:
         """Update spindle speed while running (10–200 %)."""
@@ -551,6 +567,145 @@ class MDX40A:
             log.warning("reset_spindle_time: timeout waiting for ack")
         return ok
 
+    # ── Coordinate systems / WCS ──────────────────────────────────────────────
+
+    @property
+    def active_wcs(self) -> int:
+        """Active WCS index. 0 = machine coordinates (MCS), 1-10 = WCS1-WCS10."""
+        return self._active_wcs
+
+    @property
+    def wcs_offset(self) -> tuple:
+        """Machine coords of the active WCS origin as (x_mm, y_mm, z_mm, a_deg).
+        All zeros when MCS is active. Subtract from GET 0x0100 values for display.
+        RE: compute_display_coords @ 0x00403810 — displayed = machine - origin.
+        """
+        return self._wcs_offset
+
+    def get_wcs_origin(self, slot: int) -> Optional[tuple]:
+        """Read stored XYZA origin for WCS slot 1-10 from firmware (Pattern B).
+
+        RE: query_coord_system_by_index @ 0x00403910.
+        Returns (x_mm, y_mm, z_mm, a_deg) or None on error.
+        """
+        if not 1 <= slot <= 10:
+            raise ValueError(f"WCS slot must be 1–10, got {slot}")
+        wv = _WCS_READ_WVAL[slot - 1]
+        try:
+            with self._usb_lock:
+                data = _usb.trigger_read_b(self._dev, wv, 16)
+            if data is None or len(data) < 16:
+                log.warning("get_wcs_origin(%d): short/no response", slot)
+                return None
+            x, y, z, a = struct.unpack_from('>4i', bytes(data))
+            return (x / 1000.0, y / 1000.0, z / 1000.0, a / 1000.0)
+        except usb.core.USBError as e:
+            log.warning("get_wcs_origin(%d) failed: %s", slot, e)
+            return None
+
+    def set_active_wcs(self, slot: int) -> None:
+        """Activate WCS slot (0=MCS, 1-10=WCS1-10). Updates the display offset cache.
+
+        RE: set_coordinate_system @ 0x0041a300 — SET 0x3006, 1×uint32 index.
+        After activating, re-reads the new slot's stored origin so the TUI can
+        subtract it from GET 0x0100 values, mirroring VPanel's compute_display_coords.
+        """
+        if not 0 <= slot <= 10:
+            raise ValueError(f"WCS slot must be 0–10, got {slot}")
+        try:
+            with self._usb_lock:
+                _usb.vend_set(self._dev, 0x3006, struct.pack('>I', slot))
+            log.info("Active WCS → %d", slot)
+            self._active_wcs = slot
+            if slot == 0:
+                self._wcs_offset = (0.0, 0.0, 0.0, 0.0)
+            else:
+                origin = self.get_wcs_origin(slot)
+                self._wcs_offset = origin if origin else (0.0, 0.0, 0.0, 0.0)
+        except usb.core.USBError as e:
+            log.warning("set_active_wcs(%d) failed: %s", slot, e)
+
+    def capture_origin(self, slot: Optional[int] = None) -> bool:
+        """Latch current machine position as the WCS origin (SET 0x3f2).
+
+        If `slot` differs from the active WCS, activates it first (SET 0x3006).
+        RE: on_cmd_set_origin_point @ 0x00416AB0 — bare trigger SET 0x3f2; firmware
+        captures its encoder positions into the currently active WCS slot.
+        """
+        target = slot if slot is not None else self._active_wcs
+        if target == 0:
+            log.warning("capture_origin: cannot capture into MCS (slot 0)")
+            return False
+        try:
+            if target != self._active_wcs:
+                with self._usb_lock:
+                    _usb.vend_set(self._dev, 0x3006, struct.pack('>I', target))
+                self._active_wcs = target
+            with self._usb_lock:
+                _usb.vend_set(self._dev, 0x3f2)
+            log.info("Origin captured into WCS%d", target)
+            origin = self.get_wcs_origin(target)
+            if origin:
+                self._wcs_offset = origin
+            return True
+        except usb.core.USBError as e:
+            log.warning("capture_origin failed: %s", e)
+            return False
+
+    def write_wcs_origin(
+        self, slot: int,
+        x_mm: float, y_mm: float, z_mm: float, a_deg: float,
+    ) -> None:
+        """Write an explicit XYZA value into a WCS origin slot (1-10).
+
+        RE: FUN_00403a40 — SET 0x030c (WCS1) / 0x3335-0x333d (WCS2-10), 4×uint32 BE.
+        Updates the display offset cache if this slot is currently active.
+        """
+        if not 1 <= slot <= 10:
+            raise ValueError(f"WCS slot must be 1–10, got {slot}")
+        wv = _WCS_WRITE_WVAL[slot - 1]
+        payload = struct.pack(
+            '>4i',
+            round(x_mm * 1000), round(y_mm * 1000),
+            round(z_mm * 1000), round(a_deg * 1000),
+        )
+        try:
+            with self._usb_lock:
+                _usb.vend_set(self._dev, wv, payload)
+            log.info("WCS%d origin written: (%.3f, %.3f, %.3f, %.3f°)",
+                     slot, x_mm, y_mm, z_mm, a_deg)
+            if slot == self._active_wcs:
+                self._wcs_offset = (x_mm, y_mm, z_mm, a_deg)
+        except usb.core.USBError as e:
+            log.warning("write_wcs_origin(%d) failed: %s", slot, e)
+
+    def move_to_machine_pos(
+        self,
+        x_mm: float, y_mm: float, z_mm: float, a_deg: float,
+        speed: int = 1800,
+    ) -> None:
+        """Absolute move to machine-coordinate target (SET 0x04f7).
+
+        RE: FUN_00419ef0 @ 0x00419ef0 — absolute position move (flags=0xFFFF),
+        wrapped in operation bracket SET 0x1109 (0x00 begin / 0xff end).
+        The TUI passes machine coords here; callers convert from WCS if needed.
+        """
+        payload = struct.pack(
+            '>HH4i', speed, 0xFFFF,
+            round(x_mm * 1000), round(y_mm * 1000),
+            round(z_mm * 1000), round(a_deg * 1000),
+        )
+        try:
+            with self._usb_lock:
+                _usb.vend_set(self._dev, 0x1109, b'\x00')
+                _usb.vend_set(self._dev, 0x04f7, payload)
+                _usb.vend_set(self._dev, 0x3f2)
+                _usb.vend_set(self._dev, 0x1109, b'\xff')
+            log.info("Move to machine (%.3f, %.3f, %.3f, %.3f°) speed=%d",
+                     x_mm, y_mm, z_mm, a_deg, speed)
+        except usb.core.USBError as e:
+            log.warning("move_to_machine_pos failed: %s", e)
+
     def _wait_settle(self, axis: str, timeout: float) -> MachineState:
         """Wait for motion to complete using firmware ping bits, then read final position."""
         completed = self._wait_motion_complete(timeout)
@@ -626,23 +781,6 @@ class MDX40A:
             log.info("Spindle target RPM read from device: %d", rpm)
         else:
             log.info("Spindle RPM read failed or out of range (%s); defaulting to %d", rpm, SPINDLE_RPM_MIN)
-
-        # Set spindle speed and cutting feed overrides to 100% at startup.
-        # VPanel never sends these at startup (only on button press), so the
-        # firmware default may be unknown.  Explicitly setting 100% is safe
-        # and matches the user expectation of full-speed operation.
-        try:
-            with self._usb_lock:
-                _usb.vend_set(dev, 0x3008, bytes([100]))
-            log.info("Spindle speed override set to 100%%")
-        except usb.core.USBError as e:
-            log.warning("Spindle speed init failed: %s", e)
-        try:
-            with self._usb_lock:
-                _usb.vend_set(dev, 0x0307, bytes([100]))
-            log.info("Cutting feed rate override set to 100%%")
-        except usb.core.USBError as e:
-            log.warning("Cutting feed rate init failed: %s", e)
 
     def _read_state(self) -> Optional[MachineState]:
         """Read machine state, mirroring VPanel's 200ms poll then XYZA read.
