@@ -247,20 +247,19 @@ class TUI:
         if s.flags & FLAG_SPINDLE:
             self._m.spindle_off()
         else:
-            self._m.spindle_on()
+            self._m.spindle_on_rpm(self._m.spindle_target_rpm)
 
     def _toggle_drill_mode(self) -> None:
-        """Toggle A-axis rotary drill mode (Drill Workpiece dialog → SET 0x3809)."""
+        """Toggle A-axis rotary drilling mode."""
         self._drill_active = not self._drill_active
         self._m.rotary_drill_mode(self._drill_active)
 
     def _adjust_spindle_rpm(self, delta: int) -> None:
-        """Adjust configured spindle target RPM via SET 0x3901 (<> keys)."""
         new_rpm = self._m.spindle_target_rpm + delta
         t = _trace.get_active()
         if t:
             t.annotate(f"KEY <>  spindle_target_rpm={new_rpm}")
-        self._m.set_spindle_rpm(new_rpm)
+        self._m.spindle_on_rpm(new_rpm)
 
     def _adjust_overrides(self, delta: int) -> None:
         """Adjust spindle speed % and cutting feed % together (+/- keys)."""

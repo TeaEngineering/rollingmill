@@ -60,13 +60,12 @@ KNOWN_WVALUES: dict = {
     0x04f6: 'waypoint',               # SET; relative milling waypoint (speed=0xFFFF)
     0x04f7: 'abs_move',               # SET; absolute position '>HH4i' (spd,0xFFFF,X,Y,Z,A)
     # ── Spindle / motor ──────────────────────────────────────────────────────
-    0x03f0: 'spindle_on',             # SET bare trigger
-    0x03f1: 'spindle_off',            # SET bare trigger
     0x03f2: 'origin_capture',         # SET bare trigger (also used as "resume")
     0x03f3: 'stop',                   # SET bare trigger; immediate motion stop
     0x03f5: 'keepalive',              # SET 1-byte payload; every 200ms
-    0x0307: 'cutting_feed_pct',       # SET 1 byte (10-200)
-    0x3008: 'spindle_pct',            # SET 1 byte (10-200)
+    0x0307: 'feed_override_pct',      # SET 1 byte (10-200)
+    0x3006: 'spindle_on_speed',       # SET 1×uint32 speed in RPM
+    0x3008: 'spindle_override_pct',   # SET 1 byte (10-200)
     0x3009: 'spindle_stop',           # SET bare trigger (used in drilling sequences)
     0x3808: 'nc_spindle_speed',       # SET 2×uint16 [RPM, mode=2]; NC job only
     0x3809: 'rotatary_drill',         # SET 2×uint16 [1,0xFFFF]=start / [0,0]=stop (A-axis, Drill Workpiece dialog)
@@ -75,7 +74,6 @@ KNOWN_WVALUES: dict = {
     # ── Operation bracket ────────────────────────────────────────────────────
     0x1109: 'op_bracket',             # SET 1 byte: 0x00=begin, 0xff=end
     # ── Coordinate system selection ──────────────────────────────────────────
-    0x3006: 'coord_sys',              # SET 1×uint32 slot (0=MCS, 1-10=WCS1-10)
     # ── WCS origin reads (Pattern B; SET trigger → GET 0x0003 → 4×uint32 XYZA) ─
     0x030b: 'wcs_read_1',
     **{0x3202 + i: f'wcs_read_{i + 2}' for i in range(9)},   # WCS2-10: 0x3202..0x320a
@@ -244,9 +242,15 @@ def decode_line(
         ):
             slot = 1 if last_trigger == 0x030b else (last_trigger - 0x3202 + 2)
             return _decode_xyza(ts, f"WCS_ORIGIN[{slot}]", data)
+        if last_trigger == 0x3003 and len(data) == 4:
+            rpm = struct.unpack_from('>I', data)[0]
+            return f"{ts}  SPINDLE_RPM  {rpm} RPM"
+        if last_trigger == 0x3005 and len(data) == 8:
+            rpm_min, rpm_max = struct.unpack_from('>II', data)
+            return f"{ts}  SPINDLE_RANGE  {rpm_min} - {rpm_max} RPM"
         # Unknown trigger response — always show, never suppress
         trig = f'0x{last_trigger:04x}' if last_trigger else '?'
-        return f"{ts}  TRIGGER_RESP(from {trig})  {len(data)}b  {data.hex()}"
+        return f"{ts}  TRIGGER_RESP(from {trig}) {len(data)} {data.hex()}"
 
     # ── Short decoders ────────────────────────────────────────────────────────
     if wv == 0x0001 and direction == '<':
@@ -261,12 +265,6 @@ def decode_line(
     if wv == 0x03f5:
         return _SUPPRESS if not verbose else f"{ts}  KEEPALIVE"
 
-    if wv == 0x03f0 and direction == '>':
-        return f"{ts}  SPINDLE_ON"
-
-    if wv == 0x03f1 and direction == '>':
-        return f"{ts}  SPINDLE_OFF"
-
     if wv == 0x03f2 and direction == '>':
         return f"{ts}  ORIGIN_CAPTURE / RESUME"
 
@@ -278,10 +276,9 @@ def decode_line(
                   'end'   if data[0] == 0xff else f'0x{data[0]:02x}')
         return f"{ts}  OP_BRACKET  {action}"
 
-    if wv == 0x3006 and direction == '>' and len(data) >= 4:
-        slot = struct.unpack_from('>I', data)[0]
-        label = 'MCS' if slot == 0 else f'WCS{slot}'
-        return f"{ts}  COORD_SYS  → {label}"
+    if wv == 0x3006 and direction == '>' and len(data) == 4:
+        speed = struct.unpack_from('>I', data)[0]
+        return f"{ts} SPINDLE_ON_SPEED {speed}rpm"
 
     if wv == 0x0307 and direction == '>' and data:
         return f"{ts}  CUTTING_FEED  {data[0]}%"

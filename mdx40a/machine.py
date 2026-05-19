@@ -354,7 +354,7 @@ class MDX40A:
             log.warning("get_spindle_rpm failed: %s", e)
             return None
 
-    def set_spindle_rpm(self, rpm: int) -> None:
+    def spindle_on_rpm(self, rpm: int) -> None:
         """Set spindle target RPM (SET 0x3901, 1 × big-endian uint32).
 
         RE: FUN_0041b230 @ 0x41b230 — send_trigger_u32_array(0x3901, &rpm, 1)
@@ -366,27 +366,18 @@ class MDX40A:
         self._spindle_target_rpm = rpm   # optimistic update before USB
         try:
             with self._usb_lock:
-                _usb.vend_set(self._dev, 0x3901, struct.pack('>I', rpm))
-            log.info("Spindle target RPM → %d", rpm)
+                _usb.vend_set(self._dev, 0x3006, struct.pack('>I', rpm))
+            log.info("Spindle spindle on RPM %d", rpm)
             self._wait_ping_bit21()
         except usb.core.USBError as e:
             log.warning("set_spindle_rpm failed: %s", e)
 
-    def spindle_on(self) -> None:
-        """Start spindle motor (RE: main panel Start/Stop Spindle button → SET 0x03f0 bare trigger)."""
-        try:
-            with self._usb_lock:
-                _usb.vend_set(self._dev, 0x03f0)
-            log.info("Spindle on (SET 0x03f0)")
-        except usb.core.USBError as e:
-            log.warning("spindle_on failed: %s", e)
-
     def spindle_off(self) -> None:
-        """Stop spindle motor (RE: main panel Start/Stop Spindle button → SET 0x03f1 bare trigger)."""
+        """Stop spindle motor off."""
         try:
             with self._usb_lock:
-                _usb.vend_set(self._dev, 0x03f1)
-            log.info("Spindle off (SET 0x03f1)")
+                _usb.vend_set(self._dev, 0x3006, struct.pack('>I', 0))
+            log.info("Spindle off")
         except usb.core.USBError as e:
             log.warning("spindle_off failed: %s", e)
 
@@ -395,20 +386,20 @@ class MDX40A:
 
         RE: [Drill Workpiece] dialog Rotate/Stop buttons (0xffe/0xfff) → FUN_004027a0 /
         FUN_00402840 → FUN_0041b1d0 → SET 0x3809 [1, 0xFFFF] (rotate) / [0, 0] (stop).
-        The A-axis spins continuously at low speed; the operator uses a hand-held drill
-        to bore a center hole for tailstock support.
+        The A-axis spins continuously at low speed; the operator inserts a centre bit
+        into the tailstock to bore a center hole for tailstock support.
         """
         payload = struct.pack('<HH', 1, 0xFFFF) if enabled else struct.pack('<HH', 0, 0)
         try:
             with self._usb_lock:
                 _usb.vend_set(self._dev, 0x3809, payload)
-            log.info("Rotary drill mode %s (SET 0x3809 %s)",
+            log.info("Rotary drilling mode %s (SET 0x3809 %s)",
                      "ON" if enabled else "OFF",
                      "[1, 0xFFFF]" if enabled else "[0, 0]")
         except usb.core.USBError as e:
             log.warning("rotary_drill_mode failed: %s", e)
 
-    def set_spindle_speed(self, pct: int) -> None:
+    def set_spindle_override(self, pct: int) -> None:
         """Update spindle speed while running (10–200 %)."""
         pct = max(10, min(200, int(pct)))
         self._spindle_speed_pct = pct
@@ -419,9 +410,6 @@ class MDX40A:
         except usb.core.USBError as e:
             log.warning("set_spindle_speed failed: %s", e)
 
-    def set_spindle_speed_cached(self, pct: int) -> None:
-        """Update the cached spindle speed without sending (spindle is off)."""
-        self._spindle_speed_pct = max(10, min(200, int(pct)))
 
     # ── Cutting feed rate ─────────────────────────────────────────────────────
 
@@ -614,7 +602,8 @@ class MDX40A:
             raise ValueError(f"WCS slot must be 0–10, got {slot}")
         try:
             with self._usb_lock:
-                _usb.vend_set(self._dev, 0x3006, struct.pack('>I', slot))
+                # _usb.vend_set(self._dev, 0x3006, struct.pack('>I', slot))
+                pass
             log.info("Active WCS → %d", slot)
             self._active_wcs = slot
             if slot == 0:
