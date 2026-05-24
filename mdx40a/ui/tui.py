@@ -16,9 +16,9 @@ Keybindings:
   d          A-axis rotary drilling on / off (toggle; Drill Workpiece dialog)
   < / >      spindle target RPM  −500 / +500
   - / +      spindle & feed override %  −10 / +10
-  w          open WCS dialog (activate / move-to / overwrite coordinate systems)
-  c          enter target position numerically and move there
-  q / ESC    quit
+  c          open coordinate systems dialog (activate / move-to / overwrite)
+  m          move to position (enter XYZA numerically)
+  q          quit
 
 Run: sudo python3 -m mdx40a.ui.tui [-v|-vv]
 """
@@ -164,7 +164,7 @@ class TUI:
             self._wcs_handle_key(key)
             return
 
-        if key in (ord('q'), ord('Q'), 27):
+        if key in (ord('q'), ord('Q')):
             if self._moving:
                 self._m.stop_motion()
             self._quit.set()
@@ -211,9 +211,9 @@ class TUI:
             self._adjust_overrides(+10)
         elif key in (ord('d'), ord('D')):
             self._toggle_drill_mode()
-        elif key in (ord('w'), ord('W')):
-            self._wcs_open_dialog()
         elif key in (ord('c'), ord('C')):
+            self._wcs_open_dialog()
+        elif key in (ord('m'), ord('M')):
             self._coord_entry_pending = True   # signal draw loop to run modal entry
 
     def _start_jog(self, axis: str, sign: int) -> None:
@@ -383,7 +383,7 @@ class TUI:
         if ref_row > row + 1:
             key_lines = [
                 '  ←→ X   ↑↓ Y   a/z Z   [] A',
-                '  f fast/slow   1-5 step   s spindle   d A-drill   <> RPM   -/+ override%   w coords   c move-to   q quit',
+                '  f fast/slow   1-5 step   s spindle   d A-drill   <> RPM   -/+ override%   c coords   m move-to   q quit',
             ]
             for i, line in enumerate(key_lines):
                 r = ref_row + i
@@ -450,9 +450,9 @@ class TUI:
             self._wcs_sel = max(0, self._wcs_sel - 1)
         elif key == curses.KEY_DOWN:
             self._wcs_sel = min(10, self._wcs_sel + 1)
-        elif key in (ord('a'), ord('A')):         # Activate
+        elif key in (ord('a'), ord('A'), 10, 13):  # Activate
             self._m.set_active_wcs(self._wcs_sel)
-        elif key in (ord('m'), ord('M'), 10, 13): # Move to stored origin
+        elif key in (ord('m'), ord('M')):          # Move to stored origin
             if self._wcs_sel == 0:
                 return   # MCS origin is always (0,0,0,0) — no-op / already there
             if self._wcs_data and self._wcs_data[self._wcs_sel]:
@@ -504,7 +504,7 @@ class TUI:
         # Data rows: 0=MCS, 1-10=WCS1-10
         for i in range(min(11, dh - 5)):
             row = 3 + i
-            if row >= dh - 2:
+            if row >= dh - 3:
                 break
             label   = 'MCS ' if i == 0 else f'WC{i:<2d}'
             is_active   = (i == self._m.active_wcs)
@@ -533,11 +533,11 @@ class TUI:
             except curses.error:
                 pass
 
-        # Key reference
-        ref_row = dh - 2
-        keys = ' ↑↓ navigate   A activate   M move to   O overwrite   R reload   Esc close'
-        win.addstr(ref_row, 1, '─' * (dw - 2), CP(_CP_LABEL))
-        win.addstr(ref_row + 1, 1, keys[:dw - 2], CP(_CP_KEYS))
+        # Key reference — separator at dh-3, keys at dh-2, border at dh-1
+        ref_row = dh - 3
+        keys = ' ↑↓ navigate   Enter/A activate   M move to   O overwrite   R reload   Esc close'
+        win.addstr(ref_row,     1, '─' * (dw - 2), CP(_CP_LABEL))
+        win.addstr(ref_row + 1, 1, keys[:dw - 2],  CP(_CP_KEYS))
 
         win.refresh()
 
