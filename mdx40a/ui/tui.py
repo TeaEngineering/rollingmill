@@ -685,6 +685,8 @@ def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description='MDX-40A interactive TUI')
     parser.add_argument('-v', '--verbose', action='count', default=0,
                         help='-v INFO  -vv DEBUG')
+    parser.add_argument('--mock', action='store_true',
+                        help='Mock USB layer — run without a physical device')
     args = parser.parse_args(argv)
 
     level = {0: logging.WARNING, 1: logging.INFO}.get(args.verbose, logging.DEBUG)
@@ -696,6 +698,10 @@ def main(argv=None) -> None:
     root.addHandler(log_buf)
     root.setLevel(level)
     logging.getLogger('usb').setLevel(logging.WARNING)
+
+    if args.mock:
+        from .. import usb as _usb
+        _usb.set_mock()
 
     with _trace.open_trace() as t:
         _trace.set_active(t)
