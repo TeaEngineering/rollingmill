@@ -115,6 +115,12 @@ class TUI:
         self._drill_active        = False   # A-axis rotary drill mode (SET 0x3809)
         # NC cut panel
         self._cut_job: Optional[CutJob] = None
+        # Tool diameter offsets dialog
+        self._tool_open     = False
+        self._tool_sel      = 0
+        self._tool_data     : Optional[list] = None   # list[8] float|None
+        self._tool_editing  = False
+        self._tool_edit_buf = ''
 
     # ── Entry point ───────────────────────────────────────────────────────────
 
@@ -175,9 +181,12 @@ class TUI:
     # ── Input ─────────────────────────────────────────────────────────────────
 
     def _handle_key(self, key: int) -> None:
-        # WCS dialog swallows all keys while open
+        # Modal dialogs swallow all keys while open
         if self._wcs_open:
             self._wcs_handle_key(key)
+            return
+        if self._tool_open:
+            self._tool_handle_key(key)
             return
 
         if key in (ord('q'), ord('Q')):
@@ -249,6 +258,8 @@ class TUI:
             self._wcs_open_dialog()
         elif key in (ord('m'), ord('M')):
             self._coord_entry_pending = True   # signal draw loop to run modal entry
+        elif key in (ord('t'), ord('T')):
+            self._tool_open_dialog()
 
     def _start_jog(self, axis: str, sign: int) -> None:
         if self._jog_thr and self._jog_thr.is_alive():
@@ -341,6 +352,9 @@ class TUI:
         if self._wcs_open:
             self._draw_wcs_dialog(stdscr, rows, cols)
 
+        if self._tool_open:
+            self._draw_tool_dialog(stdscr, rows, cols)
+
     def _draw_state(self, win: curses.window, height: int, cols: int) -> None:
         s     = self._m.state
         CP    = curses.color_pair
@@ -426,7 +440,7 @@ class TUI:
         if ref_row > row + 1:
             key_lines = [
                 '  ←→ X   ↑↓ Y   a/z Z   [] A',
-                '  f fast/slow   1-5 step   s spindle   d A-drill   <> RPM   -/+ override%   c coords   m move-to   q quit',
+                '  f fast/slow   1-5 step   s spindle   d A-drill   <> RPM   -/+ override%   c coords   m move-to   t tools   q quit',
             ]
             for i, line in enumerate(key_lines):
                 r = ref_row + i
@@ -579,6 +593,117 @@ class TUI:
         # Key reference — separator at dh-3, keys at dh-2, border at dh-1
         ref_row = dh - 3
         keys = ' ↑↓ navigate   Enter/A activate   M move to   O overwrite   R reload   Esc close'
+        win.addstr(ref_row,     1, '─' * (dw - 2), CP(_CP_LABEL))
+        win.addstr(ref_row + 1, 1, keys[:dw - 2],  CP(_CP_KEYS))
+
+        win.refresh()
+
+    # ── Tool diameter offsets dialog ──────────────────────────────────────────
+
+    def _tool_open_dialog(self) -> None:
+        self._tool_open     = True
+        self._tool_sel      = 0
+        self._tool_editing  = False
+        self._tool_edit_buf = ''
+        self._tool_data     = self._m.get_tool_offsets()
+
+    def _tool_handle_key(self, key: int) -> None:
+        if self._tool_editing:
+            self._tool_edit_key(key)
+            return
+        if key in (27, ord('q'), ord('Q')):
+            self._tool_open = False
+        elif key == curses.KEY_UP:
+            self._tool_sel = max(0, self._tool_sel - 1)
+        elif key == curses.KEY_DOWN:
+            self._tool_sel = min(7, self._tool_sel + 1)
+        elif key in (ord('e'), ord('E'), 10, 13):
+            if self._tool_data is not None:
+                val = self._tool_data[self._tool_sel]
+                self._tool_edit_buf = f'{val:.3f}' if val is not None else ''
+                self._tool_editing  = True
+        elif key in (ord('r'), ord('R')):
+            self._tool_editing = False
+            self._tool_data    = self._m.get_tool_offsets()
+
+    def _tool_edit_key(self, key: int) -> None:
+        if key == 27:   # Esc — cancel
+            self._tool_editing  = False
+            self._tool_edit_buf = ''
+        elif key in (10, 13):   # Enter — commit
+            try:
+                val  = float(self._tool_edit_buf)
+                slot = self._tool_sel + 1
+                if self._tool_data is not None:
+                    self._tool_data[self._tool_sel] = val
+                self._m.set_tool_offset(slot, val)
+            except ValueError:
+                pass
+            self._tool_editing  = False
+            self._tool_edit_buf = ''
+        elif key in (127, curses.KEY_BACKSPACE, 8):   # Backspace
+            self._tool_edit_buf = self._tool_edit_buf[:-1]
+        elif 32 <= key < 128:
+            ch = chr(key)
+            if ch in '0123456789.' or (ch == '-' and not self._tool_edit_buf):
+                if len(self._tool_edit_buf) < 10:
+                    self._tool_edit_buf += ch
+
+    def _draw_tool_dialog(self, stdscr: curses.window, rows: int, cols: int) -> None:
+        CP   = curses.color_pair
+        BOLD = curses.A_BOLD
+
+        dh = min(15, rows - 2)
+        dw = min(56, cols - 2)
+        dy = (rows - dh) // 2
+        dx = (cols - dw) // 2
+
+        try:
+            win = curses.newwin(dh, dw, dy, dx)
+        except curses.error:
+            return
+
+        win.erase()
+        win.box()
+
+        win.addstr(0, 2, ' Tool Diameter Offsets'[:dw - 4], CP(_CP_HEADER) | BOLD)
+
+        if dh < 5:
+            win.refresh()
+            return
+
+        hdr = f"  {'Slot':4s}  {'Value (mm)':>12s}"
+        win.addstr(1, 1, hdr[:dw - 2], CP(_CP_LABEL))
+        win.addstr(2, 1, '─' * (dw - 2), CP(_CP_LABEL))
+
+        for i in range(8):
+            row = 3 + i
+            if row >= dh - 3:
+                break
+            is_sel = (i == self._tool_sel)
+
+            if self._tool_data and self._tool_data[i] is not None:
+                val_str = f'{self._tool_data[i]:>12.3f}'
+            else:
+                val_str = f'{"?":>12s}'
+
+            if is_sel and self._tool_editing:
+                line = f'  T{i + 1:<3d}  {val_str}  → {self._tool_edit_buf}_'
+                attr = CP(_CP_ACTIVE) | BOLD
+            elif is_sel:
+                line = f'  T{i + 1:<3d}  {val_str}'
+                attr = CP(_CP_ACTIVE) | BOLD
+            else:
+                line = f'  T{i + 1:<3d}  {val_str}'
+                attr = CP(_CP_VALUE)
+
+            try:
+                win.addstr(row, 1, line[:dw - 2], attr)
+            except curses.error:
+                pass
+
+        ref_row = dh - 3
+        keys = ' ↑↓ navigate   Enter/E edit   R reload   Esc close'
         win.addstr(ref_row,     1, '─' * (dw - 2), CP(_CP_LABEL))
         win.addstr(ref_row + 1, 1, keys[:dw - 2],  CP(_CP_KEYS))
 

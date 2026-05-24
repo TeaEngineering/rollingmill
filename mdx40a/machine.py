@@ -53,6 +53,11 @@ _WCS_WRITE_WVAL = (
     0x333c, 0x333d,                      # WCS9-10
 )
 
+# Tool diameter offset wValues (slots 1-8, 0-indexed in tuple)
+# RE: FUN_00402990 (read) / apply_axis_config_to_device (write)
+_TOOL_OFFSET_READ_WVAL  = tuple(0x346a + i for i in range(1, 9))   # 0x346b..0x3472
+_TOOL_OFFSET_WRITE_WVAL = tuple(0x347a + i for i in range(1, 9))   # 0x347b..0x3482
+
 # Ping status bits (GET wValue=0x0001, 4-byte response, little-endian uint32)
 # RE: jog_wait_busy_bits_clear @ 0x00417b00, wait_move_bit_clear @ 0x0041b8d0
 _PING_BUSY_MASK  = 0x00200004   # bits 21 and 2 — firmware busy (jog motion-complete gate)
@@ -667,6 +672,49 @@ class MDX40A:
                 self._wcs_offset = (x_mm, y_mm, z_mm, a_deg)
         except usb.core.USBError as e:
             log.warning("write_wcs_origin(%d) failed: %s", slot, e)
+
+    # ── Tool diameter offsets ─────────────────────────────────────────────────
+
+    def get_tool_offsets(self) -> list:
+        """Read all 8 tool diameter offset slots from firmware (Pattern B).
+
+        RE: FUN_00402990 — wValue = 0x346a+i for i=1..8, 4-byte uint32 BE.
+        Values stored as 1/1000 mm. Returns list of 8 floats (mm), None on error.
+        """
+        results = []
+        for i, wv in enumerate(_TOOL_OFFSET_READ_WVAL, 1):
+            try:
+                with self._usb_lock:
+                    data = _usb.trigger_read_b(self._dev, wv, 4)
+                if data is None or len(data) < 4:
+                    log.warning("get_tool_offset(%d): short/no response", i)
+                    results.append(None)
+                else:
+                    raw = struct.unpack_from('>I', bytes(data))[0]
+                    results.append(raw / 1000.0)
+            except usb.core.USBError as e:
+                log.warning("get_tool_offset(%d) failed: %s", i, e)
+                results.append(None)
+        return results
+
+    def set_tool_offset(self, slot: int, value_mm: float) -> bool:
+        """Write one tool diameter offset slot (1-8) to firmware.
+
+        RE: apply_axis_config_to_device — wValue = 0x347a+i, 4-byte uint32 BE.
+        Polls ping bit 21 clear after write (firmware ack). Returns True if acked.
+        """
+        if not 1 <= slot <= 8:
+            raise ValueError(f"Tool offset slot must be 1–8, got {slot}")
+        wv = _TOOL_OFFSET_WRITE_WVAL[slot - 1]
+        raw = max(0, round(value_mm * 1000))
+        try:
+            with self._usb_lock:
+                _usb.vend_set(self._dev, wv, struct.pack('>I', raw))
+            log.info("Tool offset T%d → %.3f mm (raw %d)", slot, value_mm, raw)
+        except usb.core.USBError as e:
+            log.warning("set_tool_offset(%d) failed: %s", slot, e)
+            return False
+        return self._wait_ping_bit21()
 
     def move_to_machine_pos(
         self,
