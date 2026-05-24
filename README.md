@@ -27,6 +27,8 @@ The official Windows stack consists of:
 
 RollingMill implements both layers in pure Python.
 
+Need nc toolpaths? See https://modsproject.org/ to generate them.
+
 
 Jog Speeds
 ------

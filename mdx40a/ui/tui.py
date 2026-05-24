@@ -20,7 +20,13 @@ Keybindings:
   m          move to position (enter XYZA numerically)
   q          quit
 
-Run: sudo python3 -m mdx40a.ui.tui [-v|-vv]
+Cut panel (visible when --file is given):
+  r          run — stream file continuously in bulk mode
+  x          step mode — pause before each block
+  n / Space  send next block (step mode)
+  p          pause bulk run (enter step mode)
+
+Run: python3 -m mdx40a.ui.tui [-v|-vv] [--file <file.nc>]
 """
 
 import argparse
@@ -36,6 +42,7 @@ from .. import trace as _trace
 from ..machine import (FLAG_DOOR, FLAG_SPINDLE, FLAG_CMD_MOVE, FLAG_TOOLBTN,
                        FLAG_MOVING, FLAG_BUSY, FLAG_ERROR,
                        FLAG_STATE, FLAG_STATE_SHIFT, STATE_MAP)
+from ..cutjob import CutJob
 from . import log as _log
 
 # ── Jog parameters ────────────────────────────────────────────────────────────
@@ -106,6 +113,8 @@ class TUI:
         self._wcs_loading        = False
         self._coord_entry_pending = False   # set by 'c' key; consumed in run loop
         self._drill_active        = False   # A-axis rotary drill mode (SET 0x3809)
+        # NC cut panel
+        self._cut_job: Optional[CutJob] = None
 
     # ── Entry point ───────────────────────────────────────────────────────────
 
@@ -132,6 +141,13 @@ class TUI:
                 stdscr.clear()
 
             self._draw(stdscr)
+
+    # ── NC file ───────────────────────────────────────────────────────────────
+
+    def load_nc_file(self, path: str) -> None:
+        """Load an NC/RML file and arm the cut panel in step mode."""
+        self._cut_job = CutJob.from_file(self._m, path)
+        self._cut_job.start_step()
 
     # ── Colour setup ──────────────────────────────────────────────────────────
 
@@ -167,8 +183,26 @@ class TUI:
         if key in (ord('q'), ord('Q')):
             if self._moving:
                 self._m.stop_motion()
+            if self._cut_job:
+                self._cut_job.abort()
             self._quit.set()
             return
+
+        # NC cut panel keys (when a file is loaded)
+        if self._cut_job:
+            job = self._cut_job
+            if key in (ord('r'), ord('R')):
+                job.start_run()
+                return
+            if key in (ord('x'), ord('X')):
+                job.start_step()
+                return
+            if key in (ord('n'), ord('N'), ord(' '), 10, 13):
+                job.next_block()
+                return
+            if key in (ord('p'), ord('P')):
+                job.pause()
+                return
 
         JOG_KEYS = {
             curses.KEY_RIGHT: ('X', +1),
@@ -280,14 +314,23 @@ class TUI:
         rows, cols = stdscr.getmaxyx()
         stdscr.erase()
 
-        # Divide screen: top half state, separator, bottom half log
         state_h = rows // 2
-        sep_row = state_h
-        log_row = sep_row + 1
-        log_h   = rows - log_row
-
+        sep1    = state_h
         self._draw_state(stdscr, state_h, cols)
-        self._draw_separator(stdscr, sep_row, cols)
+        self._draw_separator(stdscr, sep1, cols)
+
+        if self._cut_job:
+            nc_row = sep1 + 1
+            nc_h   = max(4, min(9, rows - nc_row - 3))
+            sep2   = nc_row + nc_h
+            log_row = sep2 + 1
+            log_h   = rows - log_row
+            self._draw_nc_panel(stdscr, nc_row, nc_h, cols)
+            self._draw_separator(stdscr, sep2, cols)
+        else:
+            log_row = sep1 + 1
+            log_h   = rows - log_row
+
         self._draw_log(stdscr, log_row, log_h, cols)
 
         try:
@@ -636,6 +679,58 @@ class TUI:
             daemon=True, name='coord-move',
         ).start()
 
+    def _draw_nc_panel(self, win: curses.window, start: int, height: int, cols: int) -> None:
+        if not self._cut_job or height < 2:
+            return
+        job  = self._cut_job
+        CP   = curses.color_pair
+        BOLD = curses.A_BOLD
+
+        idx   = job.block_idx
+        total = job.total
+        st    = job.state
+        pct   = int(100 * idx / total) if total else 0
+
+        mode_lbl = {
+            CutJob.IDLE:     'IDLE',
+            CutJob.STEPPING: 'STEP',
+            CutJob.WAITING:  'WAIT',
+            CutJob.RUNNING:  'RUN ',
+            CutJob.DONE:     'DONE',
+            CutJob.ERROR:    'ERR ',
+        }.get(st, st[:4].upper())
+
+        bar_w  = max(4, min(20, cols // 5))
+        filled = int(bar_w * idx / total) if total else 0
+        bar    = '█' * filled + '░' * (bar_w - filled)
+
+        err_suffix = f'  {job.error}' if st == CutJob.ERROR and job.error else ''
+        hdr = (f'  {mode_lbl}  {job.filename}  │  '
+               f'Block {idx:4d}/{total:<4d}  [{bar}] {pct:3d}%'
+               f'{err_suffix}')
+        hdr_attr = CP(_CP_LOG_ERR) | BOLD if st == CutJob.ERROR else CP(_CP_LABEL) | BOLD
+        self._put(win, start, 0, hdr, hdr_attr)
+
+        # Key hint on the right of the header row
+        hint = 'r run  x step  n/Spc next  p pause'
+        hint_col = max(0, cols - len(hint) - 1)
+        self._put(win, start, hint_col, hint, CP(_CP_KEYS))
+
+        # Context lines: 2 before cursor, cursor highlighted, rest after
+        view_start = max(0, idx - 2)
+        for off, bi in enumerate(range(view_start, min(total, view_start + height - 1))):
+            r = start + 1 + off
+            if r >= start + height:
+                break
+            txt = job.line_at(bi)
+            num = f'{bi + 1:4d}'
+            if bi == idx:
+                self._put(win, r, 0, f' ▶ {num}  {txt}', CP(_CP_ACTIVE) | BOLD)
+            elif bi < idx:
+                self._put(win, r, 0, f'   {num}  {txt}', CP(_CP_DIM))
+            else:
+                self._put(win, r, 0, f'   {num}  {txt}', CP(_CP_VALUE))
+
     def _draw_separator(self, win: curses.window, row: int, cols: int) -> None:
         rows, _ = win.getmaxyx()
         if row >= rows:
@@ -685,6 +780,8 @@ def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description='MDX-40A interactive TUI')
     parser.add_argument('-v', '--verbose', action='count', default=0,
                         help='-v INFO  -vv DEBUG')
+    parser.add_argument('--file', '-f', metavar='FILE',
+                        help='NC/RML file to load in the cut panel')
     parser.add_argument('--mock', action='store_true',
                         help='Mock USB layer — run without a physical device')
     args = parser.parse_args(argv)
@@ -709,6 +806,8 @@ def main(argv=None) -> None:
         t.annotate(f"argv: {' '.join(sys.argv)}")
         with _machine.MDX40A() as m:
             tui = TUI(m, log_buf)
+            if args.file:
+                tui.load_nc_file(args.file)
             curses.wrapper(tui.run)
         _trace.set_active(None)
 

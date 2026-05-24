@@ -823,3 +823,29 @@ class MDX40A:
                 if secs is not None:
                     self._spindle_secs = secs
             self._stop_event.wait(POLL_INTERVAL)
+
+    # ── NC / RML file output ──────────────────────────────────────────────────
+
+    def bulk_write(self, data: bytes) -> int:
+        """Write raw bytes to the bulk-OUT endpoint (NC/RML command stream).
+
+        Does not acquire _usb_lock — bulk-OUT is a separate USB pipe from the
+        vendor control transfers used for state polling.
+        """
+        return _usb.bulk_write(self._dev, data)
+
+    def get_nc_bytes_processed(self) -> int:
+        """Read NC bytes-processed counter (Pattern B, wValue=0x0200).
+
+        RE: get_coord_pair_0x200 @ 0x0041c290 — SET 0x0200 → GET 0x0003, 4 bytes BE.
+        Firmware increments this as it consumes NC data from its internal buffer.
+        Returns unsigned 32-bit counter, or -1 on error.
+        """
+        try:
+            with self._usb_lock:
+                data = _usb.trigger_read(self._dev, 0x0200, 4)
+            if data and len(data) >= 4:
+                return struct.unpack('>I', bytes(data[:4]))[0]
+        except usb.core.USBError as e:
+            log.debug("get_nc_bytes_processed failed: %s", e)
+        return -1
