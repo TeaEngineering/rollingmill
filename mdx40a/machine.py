@@ -599,16 +599,14 @@ class MDX40A:
     def set_active_wcs(self, slot: int) -> None:
         """Activate WCS slot (0=MCS, 1-10=WCS1-10). Updates the display offset cache.
 
-        RE: set_coordinate_system @ 0x0041a300 — SET 0x3006, 1×uint32 index.
         After activating, re-reads the new slot's stored origin so the TUI can
         subtract it from GET 0x0100 values, mirroring VPanel's compute_display_coords.
         """
         if not 0 <= slot <= 10:
             raise ValueError(f"WCS slot must be 0–10, got {slot}")
         try:
-            with self._usb_lock:
-                # _usb.vend_set(self._dev, 0x3006, struct.pack('>I', slot))
-                pass
+            # with self._usb_lock:
+            #     pass
             log.info("Active WCS → %d", slot)
             self._active_wcs = slot
             if slot == 0:
@@ -622,7 +620,7 @@ class MDX40A:
     def capture_origin(self, slot: Optional[int] = None) -> bool:
         """Latch current machine position as the WCS origin (SET 0x3f2).
 
-        If `slot` differs from the active WCS, activates it first (SET 0x3006).
+        If `slot` differs from the active WCS, activates it first.
         RE: on_cmd_set_origin_point @ 0x00416AB0 — bare trigger SET 0x3f2; firmware
         captures its encoder positions into the currently active WCS slot.
         """
@@ -632,8 +630,6 @@ class MDX40A:
             return False
         try:
             if target != self._active_wcs:
-                with self._usb_lock:
-                    _usb.vend_set(self._dev, 0x3006, struct.pack('>I', target))
                 self._active_wcs = target
             with self._usb_lock:
                 _usb.vend_set(self._dev, 0x3f2)
