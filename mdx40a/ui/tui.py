@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Curses TUI for Roland MDX-40A.
+Curses TUI for MDX desktop mills.
 
   Top half  — live machine state: XYZA coordinates, flags, status
   Bottom half — scrolling log output (Python logging)
@@ -412,7 +412,9 @@ class TUI:
         lin_lbl   = STEPS_LINEAR[self._step_i]
         rot_lbl   = STEPS_ROTARY[self._step_i]
         wcs_lbl   = 'MCS' if self._m.active_wcs == 0 else f'WCS{self._m.active_wcs}'
-        title     = f" Roland MDX-40A  │  {speed_lbl}  │  XYZ {lin_lbl}mm  A {rot_lbl}°  │  {wcs_lbl} "
+        rotary_lbl = {0: "No Extension", 1: "Rotary Axis", 2: "Rotary Vice"}.get(
+            self._m.rotary_extension_byte, "?")
+        title     = f" Roland MDX-40A  │  {speed_lbl}  │  XYZ {lin_lbl}mm  A {rot_lbl}°  │  {wcs_lbl}  │  {rotary_lbl} "
         self._put(win, 0, 0, title.ljust(cols), CP(_CP_HEADER) | BOLD)
 
         if height < 3:
@@ -481,6 +483,19 @@ class TUI:
             if secs is not None:
                 h, m = secs // 3600, (secs % 3600) // 60
                 self._put(win, row, 62, f'runtime {h}h {m:02d}m', CP(_CP_LABEL))
+
+        # Row: rotary axis centreline origin (only shown when rotary is installed)
+        rotary_byte = self._m.rotary_extension_byte
+        if rotary_byte is not None and rotary_byte >= 1:
+            row += 1
+            if row < height:
+                cl = self._m.rotary_centerline
+                if cl is not None:
+                    cx, cy, cz = cl
+                    text = f'Rotary origin  X: {cx:.3f}   Y: {cy:.3f}   Z: {cz:.3f}'
+                else:
+                    text = 'Rotary origin  (not yet read)'
+                self._put(win, row, 2, text, CP(_CP_LABEL))
 
         # Rows: key reference (near bottom of state pane)
         ref_row = height - 2

@@ -1,7 +1,7 @@
 """
 Raw USB transport layer for Roland MDX-40A.
 
-No Roland semantics here — just the four primitives the protocol needs.
+No MDX semantics here — just the four primitives the protocol needs.
 All functions raise usb.core.USBError on failure.
 
 Mock mode
@@ -129,6 +129,9 @@ def vend_set(dev: Any, wValue: int, data: bytes = b"", timeout:int =2000) -> Non
 def vend_get(dev: Any, wValue: int, length: int, timeout:int=2000) -> bytes:
     """Vendor control IN (VEND_GET_CMD). Returns array of `length` bytes."""
     if _mock:
+        if wValue == 0x0002:
+            # Machine-type probe: high word 0x1234 = MDX-40A confirmed (endian check).
+            return (b"\x00\x00\x12\x34" + b"\x00" * length)[:length]
         return bytes(bytearray(length))
     t = _trace.get_active()
     try:

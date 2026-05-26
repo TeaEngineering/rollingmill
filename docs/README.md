@@ -41,7 +41,7 @@ We skip the entire printer stack.
 | Document | Summary |
 |----------|---------|
 | [Coordinate Systems, Move To, and Origins](coordinate-systems.md) | WCS slots, display math, Move-To modes, Set Origin commands, VIEW position vs WCS origin |
-| [Jig Detection Algorithm](vpanel-jig-detect.md) | A-axis calibration rod routine — triple-contact probing, pin bisection, origin write |
+| [Rotary Jig Alignment](rotary-jig-alignment.md) | A-axis calibration rod routine, "Current Jig" indicator, centreline equality check |
 | [Tool Diameter Offsets](tool-diameter-offsets.md) | Storage and USB commands for 8-slot tool diameter offset table |
 | [Tool Sensor Calibration](tool-sensor-calibration.md) | Refines the XY centre of the Z-height sensor pad |
 

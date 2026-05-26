@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Offline decoder for Roland MDX-40A USB trace files.
+Offline decoder for USB trace files.
 
 Usage:
     python -m mdx40a.decode_trace ~/roland/20260513-151859.txt
@@ -393,7 +393,7 @@ def show_all(path: Path, verbose: bool = False, strict: bool = False) -> bool:
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description='Decode Roland MDX-40A USB trace files')
+    ap = argparse.ArgumentParser(description='Decode MDX USB trace files')
     ap.add_argument('files', nargs='+', metavar='FILE')
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument('--jog',   action='store_true',

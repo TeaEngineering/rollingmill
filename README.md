@@ -3,7 +3,7 @@ RollingMill
 
 <img src="logo.png" width="35%" align="left" alt="RollingMill logo">
 
-Open-source USB control stack for Roland MDX-series desktop mills.
+Open-source USB control stack for Roland DG MDX-series desktop mills.
 
 RollingMill communicates directly with the machine over libusb, replacing both the proprietary Windows kernel driver and the VPanel control application.
 
@@ -18,7 +18,7 @@ The project currently provides:
 
 Reverse Engineering
 ------
-The Roland USB protocol was reverse engineered from the official Windows driver stack using Ghidra analysis and protocol inspection. See [the protocol documentation](docs/).
+The MDX USB protocol was reverse engineered from the official Windows driver stack using Ghidra analysis and protocol inspection. See [the protocol documentation](docs/).
 
 The official Windows stack consists of:
 

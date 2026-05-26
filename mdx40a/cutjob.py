@@ -1,8 +1,8 @@
 """
-CutJob — NC/RML file sender for the Roland MDX-40A.
+CutJob — NC/RML file sender for the MDX desktop mills.
 
 Parses a file into line-delimited blocks and drives transmission via
-MDX40A.bulk_write() and MDX40A.get_nc_bytes_processed().
+machine.bulk_write() and machine.get_nc_bytes_processed().
 
 Single-threaded: the caller drives the state machine by calling service()
 once per main-loop tick (~100 ms in the TUI). Typical use::

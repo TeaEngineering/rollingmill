@@ -160,6 +160,8 @@ class MDX40A:
         self._spindle_secs: Optional[int] = None
         self._active_wcs: int   = 0                      # 0=MCS, 1-10=WCS1-WCS10
         self._wcs_offset: tuple = (0.0, 0.0, 0.0, 0.0)  # machine coords of active WCS origin (mm/deg)
+        self._rotary_extension_byte: Optional[int] = None    # latest GET 0x3800 byte (0=none, 1=rotary, 2=rotary+vice)
+        self._rotary_centerline: Optional[tuple] = None      # stored A-axis centreline (x_mm, y_mm, z_mm); read once at idle
 
     # ── Connection lifecycle ──────────────────────────────────────────────────
 
@@ -220,6 +222,10 @@ class MDX40A:
             secs = self.get_spindle_time()
             if secs is not None:
                 self._spindle_secs = secs
+        # Read rotary centreline lazily on first idle state — calibration value, static at runtime.
+        if (self._rotary_centerline is None and s is not None and s.ready
+                and (s.flags & FLAG_STATE) >> FLAG_STATE_SHIFT == 2):
+            self._rotary_centerline = self.get_rotary_axis_centreline()
         return s
 
     # ── Jog ──────────────────────────────────────────────────────────────────
@@ -666,6 +672,44 @@ class MDX40A:
             return False
         return self._wait_ping_bit21()
 
+    # ── Rotary A-axis ─────────────────────────────────────────────────────────
+
+    @property
+    def rotary_extension_byte(self) -> Optional[int]:
+        """Latest GET 0x3800 byte (refreshed on every poll).
+        0 = no rotary attachment, 1 = rotary axis only, 2 = rotary + vice headstock.
+        None until the first poll completes. See docs/machine-state.md.
+        """
+        return self._rotary_extension_byte
+
+    @property
+    def rotary_centerline(self) -> Optional[tuple]:
+        """Stored A-axis rotary centreline (x_mm, y_mm, z_mm) in machine coords.
+
+        Calibration value (set by the Detect Jig routine via SET 0x3803), static
+        at runtime. Populated lazily by `poll()` the first time the machine
+        reaches idle state — None before that. Only Y, Z define the line; the
+        X component is the nominal touch-off X and is informational.
+        """
+        return self._rotary_centerline
+
+    def get_rotary_axis_centreline(self) -> Optional[tuple]:
+        """Read stored rotary A-axis centreline from firmware (Pattern B, GET 0x3801).
+
+        RE: get_rotary_axis_centreline_0x3801 — dev_trigger_read_uint32s(0x3801, buf, 3).
+        Returns (x_mm, y_mm, z_mm) signed int32 BE in 1/1000 mm, or None on error.
+        """
+        try:
+            data = _usb.trigger_read_b(self._dev, 0x3801, 12)
+            if data is None or len(data) < 12:
+                log.warning("get_rotary_axis_centreline: short/no response")
+                return None
+            x, y, z = struct.unpack_from('>3i', bytes(data))
+            return (x / 1000.0, y / 1000.0, z / 1000.0)
+        except usb.core.USBError as e:
+            log.warning("get_rotary_axis_centreline failed: %s", e)
+            return None
+
     def move_to_machine_pos(
         self,
         x_mm: float, y_mm: float, z_mm: float, a_deg: float,
@@ -773,6 +817,8 @@ class MDX40A:
                 try:
                     raw = _usb.trigger_read(self._dev, wv, n)
                     if raw is not None and len(raw):
+                        if wv == 0x3800:
+                            self._rotary_extension_byte = raw[0]
                         log.debug(f"GET 0x{wv:0x} returned: {raw}")
                 except usb.core.USBError as e:
                     log.debug("Poll read 0x%04x failed: %s", wv, e)

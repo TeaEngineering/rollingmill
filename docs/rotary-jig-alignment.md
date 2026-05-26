@@ -1,9 +1,11 @@
-# Jig Detection Algorithm
+# Rotary Jig Detection Algorithm
 
 The A-axis calibration rod routine finds and stores the position of the A-axis rotation
 centre in XYZ machine space, using a detection bar and detection pin fitted to the rotary table.
 
 Reference video: https://youtu.be/UKR7mRjQrUs?t=934
+
+The stored value is queried to show if the current workplace origin is on-centerline or not.
 
 ---
 
@@ -120,6 +122,9 @@ configuration test that walks a chain of preconditions and finally compares two
 stored values:
 
 1. `field_0x80 < 1` → **frame 0** (no rotary attachment sensed).
+   `field_0x80` is `AutoClass33.is_rotary_axis_installed`, populated every 200 ms by
+   `AutoClass33::poll_timer_200ms` from `GET 0x3800` (the extension-port status
+   byte) — see [machine-state.md](machine-state.md#get-0x3800--extension-port--rotary-status).
 2. `field_0xc30 < 1` → **frame 2** (rotary present, but no vice on it).
 3. `coordsys_idx == 2` (G55, the non-rotary WCS) → **frame 3** (rotary + vice
    installed; skip the centreline test because we're not in a rotary WCS).
@@ -137,7 +142,7 @@ comes from the **Detect Jig** workflow (`FUN_00410050` and surrounding code)
 when probing finds pins in positions that don't match the expected rotary
 signature.
 
-### The `MulDiv(x, 1, 10) * 10` tolerance trick
+### The `MulDiv(x, 1, 10) * 10` tolerance test
 
 Coordinates are in 1/1000 mm. The function quantises both values to a 1/100 mm
 grid before equality testing:

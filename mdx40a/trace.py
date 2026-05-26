@@ -1,5 +1,5 @@
 """
-USB session tracer for Roland MDX-40A.
+USB session tracer for MDX desktop mills.
 
 Each control transfer is written as a single line to a text file under
 ~/roland/YYYYMMDD-HHMMSS.sss.txt so sessions can be replayed or reviewed.
@@ -31,7 +31,6 @@ class Tracer:
         self._fh = open(path, "w", buffering=1)  # line-buffered
         self._start = time.monotonic()
         header = (
-            f"# Roland MDX-40A USB trace\n"
             f"# Session start: {datetime.now().isoformat(timespec='milliseconds')}\n"
             f"# Format:  HH:MM:SS.sss DIR wv=0xNNNN [len: hexdata]\n"
             f"#   >  SET  host→device\n"

@@ -136,6 +136,31 @@ See [Sending NC code](sending-nc-code.md) for usage.
 
 ---
 
+## GET 0x3800 — Extension Port / Rotary Status
+
+Pattern B, 1 byte. Polled every 200 ms by `AutoClass33::poll_timer_200ms` and cached at
+`AutoClass33.is_rotary_axis_installed` (offset `0x80`).
+
+RE: `get_rotary_extension_byte_0x3800` @ `0x0041ac50`.
+
+Reports which (if any) fixture is currently attached to the rotary/extension port on
+the right-hand side of the machine bed. Drives the "Current Jig" indicator bitmap —
+see [rotary-jig-alignment.md](rotary-jig-alignment.md#current-jig-indicator).
+
+| Value | Meaning |
+|-------|---------|
+| `0` | Extension port empty / No rotary axis |
+| `1` | Rotary axis detected, but not the vice headstock |
+| `2` | Rotary A-axis attachment and Vice detected |
+
+The cached value is compared `< 1` by `FUN_00414170` (jig indicator update) to gate
+the rotary-specific code paths: value `0` → indicator frame 0 (no rotary); `1` to indicator frame 2.
+When the vice is detected `2`, we compare the current workspace origin to the A-axis centreline. Frame 3 shows vice indicating either user cordinates or off-center, and frame 4 indicates the origin is on-centerline (within 0.01mm).
+
+
+
+---
+
 ## GET 0x3804 — Device Status Block
 
 Pattern B, 24 bytes big-endian (6×uint32).

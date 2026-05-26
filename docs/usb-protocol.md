@@ -59,7 +59,7 @@ All status/config queries use Pattern B. The polling step is mandatory — firin
 | `0x2001` | `trigger_read_0x2001` | variable | Status flags byte; bit 2 and bit 3 have distinct meanings |
 | `0x2010` | `get_uint32_0x2010` | 4 bytes | Single uint32 status |
 | `0x2100` | `get_uint16arr_0x2100` | variable | Array of uint16 values (byte-swapped) |
-| `0x3800` | `get_status_byte_0x3800` | 1 byte | Machine status byte — polled every 200 ms |
+| `0x3800` | `get_rotary_extension_byte_0x3800` | 1 byte | Extension port / rotary status — polled every 200 ms. Cached in `AutoClass33.is_rotary_axis_installed`. See [machine-state.md](machine-state.md#get-0x3800--extension-port--rotary-status) for value meanings. |
 | `0x3b01` | `query_0x3b01_var` | 4 bytes | Variable-length read; used for poll timer sync |
 
 ### Speed / feed
@@ -95,7 +95,7 @@ All status/config queries use Pattern B. The polling step is mandatory — firin
 | `0x3106` | `query_0x3106_6bytes` | 6 bytes | `byte[1]` ∈ {1,2} checked for firmware mode |
 | `0x346b`–`0x3472` | `query_indexed_0x346a` (index 1–8) | 4 bytes each | Read tool diameter offsets (8 slots) |
 | `0x3701` | `get_uint32_0x3700` | 4 bytes | Single uint32 |
-| `0x3801` | `get_rotary_axis_centreline_0x3801` | 12 bytes | 3×uint32 = stored rotary A-axis centreline `[X, Y, Z]` in 1/1000 mm. Only `Y, Z` define the line (X is "along" the rotation axis, so its value is informational only). Written by the jig-detect routine via `SET 0x3803`. Read by the "Current Jig" indicator in the main panel — see [vpanel-jig-detect.md](vpanel-jig-detect.md#current-jig-indicator). |
+| `0x3801` | `get_rotary_axis_centreline_0x3801` | 12 bytes | 3×uint32 = stored rotary A-axis centreline `[X, Y, Z]` in 1/1000 mm. Only `Y, Z` define the line (X is "along" the rotation axis, so its value is informational only). Written by the jig-detect routine via `SET 0x3803`. Read by the "Current Jig" indicator in the main panel — see [rotary-jig-alignment.md](rotary-jig-alignment.md#current-jig-indicator). |
 | `0x3804` | `get_6uint32_0x3804` | 24 bytes | 6×uint32 — busy/status block; `word[0] bit 2 (0x4)` gates jog commands |
 | `0x3a02` | `get_2uint32_0x3a02` | 8 bytes | 2×uint32 |
 | `0x3a05` | `get_uint32_0x3a05` | 4 bytes | Used in spindle-stop to override Z for positioning |
@@ -182,7 +182,7 @@ VPanel's timer fires every 200 ms and sends (all Pattern B unless noted):
 ```
 SET 0x03f5  (keepalive — 1 byte payload)
 SET 0x3005 → GET 0x0003  (speed range min/max)
-SET 0x3800 → GET 0x0003  (machine status byte)
+SET 0x3800 → GET 0x0003  (extension port / rotary status — see machine-state.md)
 SET 0x3003 → GET 0x0003  (current speed value)
 SET 0x3b01 → GET 0x0003  (timer sync)
 GET 0x0100              (Pattern A — XYZA coordinates + state flags)
