@@ -10,6 +10,7 @@ Keybindings:
   ↑/↓        Y axis  −/+
   a / z      Z axis  +/−  (a raises, z lowers)
   [/]        A axis  −/+
+  Esc        cancel in-flight jog
   f          toggle fast / slow jog speed
   1/2/3/4/5  XYZ step: 0.01/0.1/1.0/10.0/50.0 mm  A step: 0.01/0.1/1.0/10.0/90.0°
   s          spindle on / off (toggle)
@@ -72,7 +73,7 @@ class _LogBuffer(logging.Handler):
     """Captures log records into a fixed-size deque for the TUI log pane."""
 
     _FMT = logging.Formatter(
-        '%(asctime)s  %(levelname)-7s  %(name)s: %(message)s',
+        '%(asctime)s.%(msecs)03d  %(levelname)-7s  %(name)s: %(message)s',
         datefmt='%H:%M:%S',
     )
 
@@ -126,7 +127,12 @@ class TUI:
         self._init_colors()
         curses.curs_set(0)
         stdscr.nodelay(True)
-        stdscr.timeout(100)     # getch() returns every 100 ms — our cooperative tick
+        # getch() returns every 100 ms — our cooperative tick
+        stdscr.timeout(100)
+        # ncurses defaults ESCDELAY to ~1000 ms to see if Esc is the start of an
+        # arrow/function-key sequence. Drop it to 25 ms so Esc is delivered on
+        # the next tick.
+        curses.set_escdelay(25)
 
         while not self._quit:
             try:
@@ -195,6 +201,13 @@ class TUI:
             return
         if self._tool_open:
             self._tool_handle_key(key)
+            return
+
+        if key == 27:                                  # Esc — cancel an in-flight jog
+            if self._jog_armed:
+                self._m.stop_motion()
+                self._jog_armed = False
+                self._moving    = None
             return
 
         if key in (ord('q'), ord('Q')):
