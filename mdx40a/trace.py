@@ -19,6 +19,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from types import TracebackType
 
 
 class Tracer:
@@ -27,7 +28,7 @@ class Tracer:
     def __init__(self, path: Path):
         self._path = path
         self._lock = threading.Lock()
-        self._fh = open(path, 'w', buffering=1)   # line-buffered
+        self._fh = open(path, "w", buffering=1)  # line-buffered
         self._start = time.monotonic()
         header = (
             f"# Roland MDX-40A USB trace\n"
@@ -68,16 +69,25 @@ class Tracer:
                 self._fh.write(f"# Session end  elapsed={elapsed:.3f}s\n")
                 self._fh.close()
 
-    def __enter__(self):
+    def __enter__(self) -> "Tracer":
         return self
 
-    def __exit__(self, *_):
+    def __exit__(
+        self,
+        type_: type[BaseException] | None,
+        value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool | None:
         self.close()
+        return None
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _write(self, text: str) -> None:
-        ts = datetime.now().strftime('%H:%M:%S.') + f"{datetime.now().microsecond // 1000:03d}"
+        ts = (
+            datetime.now().strftime("%H:%M:%S.")
+            + f"{datetime.now().microsecond // 1000:03d}"
+        )
         with self._lock:
             self._fh.write(f"{ts} {text}\n")
 
@@ -86,7 +96,10 @@ def open_trace() -> Tracer:
     """Create ~/roland/<timestamp>.txt and return a Tracer for it."""
     directory = Path.home() / "roland"
     directory.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime('%Y%m%d-%H%M%S.') + f"{datetime.now().microsecond // 1000:03d}"
+    stamp = (
+        datetime.now().strftime("%Y%m%d-%H%M%S.")
+        + f"{datetime.now().microsecond // 1000:03d}"
+    )
     path = directory / f"{stamp}.txt"
     return Tracer(path)
 
@@ -96,10 +109,10 @@ def open_trace() -> Tracer:
 _active: Optional[Tracer] = None
 
 
-def set_active(t: Optional['Tracer']) -> None:
+def set_active(t: Optional["Tracer"]) -> None:
     global _active
     _active = t
 
 
-def get_active() -> Optional['Tracer']:
+def get_active() -> Optional["Tracer"]:
     return _active
