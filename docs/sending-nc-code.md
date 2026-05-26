@@ -109,6 +109,26 @@ Transparent to all normal bytes:
 - A `"PUF"` prefix triggers full passthrough with zero parsing.
 - **Adds no framing to the bulk channel.** RML-1/G-code bytes arrive at USB unmodified.
 
+The filter is completely transparent to firmware status. LogsRead and LogsWrite do exactly two things: pass bytes straight through, and intercept `\x03<Command>,...;` escape sequences. There is no USB status read, no ping, no error check anywhere in the filter. The only "error" behaviour is that dialog_canceled causes LogsRead to fast-forward read_pos = data_len (discards the rest of the current write buffer). The filter cannot detect firmware rejection of illegal
+  coordinates.
+
+#### Tool change — ToolInfo escape sequence
+Tool-change interception is data-embedded, not a separate USB command. The NC file must contain:
+
+    \x03ToolInfo,<toolNo>,<XYspeed>,<Zspeed>,<FillPitch>,<ZDown>,<ZUp>,<ZEngPitch>,<ColorBits>,<SpindleRPM>;\n
+
+rd25dlf64.dll `LogsRead` accumulates bytes after `\x03` until `;`, then calls `LogsDialogToolInfo` which parses the comma-separated fields and shows the "Change Tool" dialog. Dialog result codes: 7 = OK/continue, 2 = cancel job.
+
+#### "Prompt to continue" — NextPage escape sequence
+
+Same mechanism:
+
+    \x03NextPage,<pageNumber>;\n
+
+Shows: "Outputs N Page. Change work, please." Dialog: 7 = continue, 2 = cancel.
+
+
+
 ---
 
 ## Operation Bracket — SET 0x1109 (critical)

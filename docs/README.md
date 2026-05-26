@@ -21,6 +21,7 @@ Roland MDX-40A USB protocol — findings from Ghidra analysis of `VP_MDX40A.exe`
 
 | Document | Summary |
 |----------|---------|
+| [Coordinate Systems, Move To, and Origins](coordinate-systems.md) | WCS slots, display math, Move-To modes, Set Origin commands, VIEW position vs WCS origin |
 | [Jig Detection Algorithm](vpanel-jig-detect.md) | A-axis calibration rod routine — triple-contact probing, pin bisection, origin write |
 | [Tool Diameter Offsets](tool-diameter-offsets.md) | Storage and USB commands for 8-slot tool diameter offset table |
 | [Tool Sensor Calibration](tool-sensor-calibration.md) | Z-sensor location calibration routine (stub) |

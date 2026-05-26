@@ -18,7 +18,7 @@ The project currently provides:
 
 Reverse Engineering
 ------
-The Roland USB protocol was reverse engineered from the official Windows driver stack using Ghidra analysis and protocol inspection. See [the protocol documentaiton](docs/).
+The Roland USB protocol was reverse engineered from the official Windows driver stack using Ghidra analysis and protocol inspection. See [the protocol documentation](docs/).
 
 The official Windows stack consists of:
 
