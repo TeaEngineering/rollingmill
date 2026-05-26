@@ -13,6 +13,7 @@ all attribute accesses made by machine.py.
 """
 
 import time
+from typing import Optional
 
 import usb.core
 import usb.util
@@ -121,7 +122,7 @@ def vend_set(dev, wValue: int, data: bytes = b'', timeout=2000):
         raise
 
 
-def vend_get(dev, wValue, length, timeout=2000):
+def vend_get(dev, wValue: int, length: int, timeout=2000):
     """Vendor control IN (VEND_GET_CMD). Returns array of `length` bytes."""
     if _mock:
         return bytearray(length)
@@ -137,15 +138,19 @@ def vend_get(dev, wValue, length, timeout=2000):
         raise
 
 
-def trigger_read(dev, trig_wvalue, length, timeout=2000):
-    """Pattern B: SET trigger wValue to prime device, then GET wValue=0x0003."""
+def trigger_read(dev, trig_wvalue: int, length: int, timeout=2000) -> bytes:
+    """Pattern B: SET trigger wValue to prime device, then GET wValue=0x0003.
+
+    Returns the GET response as `bytes` (pyusb's raw `array('B', ...)` wrapped
+    so logs and downstream consumers see a clean b'\\x00...' representation).
+    """
     if _mock:
-        return bytearray(length)
+        return b'\x00' * length
     vend_set(dev, trig_wvalue, timeout=timeout)
-    return vend_get(dev, 0x0003, length, timeout=timeout)
+    return bytes(vend_get(dev, 0x0003, length, timeout=timeout))
 
 
-def trigger_read_b(dev, wValue, max_length, poll_timeout=0.200, timeout=2000):
+def trigger_read_b(dev, wValue, max_length, poll_timeout=0.200, timeout=2000) -> Optional[bytes]:
     """Pattern B with ping polling (RE: dev_trigger_read @ 0x0041bb90).
 
     SET wValue → poll GET 0x0001 until ping[3] (C LE *uint32 >> 24) is non-zero

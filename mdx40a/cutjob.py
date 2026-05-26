@@ -4,16 +4,19 @@ CutJob — NC/RML file sender for the Roland MDX-40A.
 Parses a file into line-delimited blocks and drives transmission via
 MDX40A.bulk_write() and MDX40A.get_nc_bytes_processed().
 
-Typical use::
+Single-threaded: the caller drives the state machine by calling service()
+once per main-loop tick (~100 ms in the TUI). Typical use::
 
     job = CutJob.from_file(machine, "part.nc")
     job.start_step()          # arm; paused before block 0
-    job.next_block()          # send block 0, wait for counter ack
+    job.next_block()          # send block 0 (state → WAITING)
+    # main loop calls job.service() each tick; WAITING polls the NC
+    # bytes-processed counter and transitions back to STEPPING on ack.
     job.start_run()           # switch to continuous bulk streaming
 
 States:
   IDLE     — constructed but not started
-  STEPPING — paused before next block, waiting for next_block()
+  STEPPING — paused, waiting for next_block()
   WAITING  — block sent, polling NC bytes-processed counter
   RUNNING  — streaming file in 32 KB bulk chunks
   DONE     — all blocks sent
@@ -21,7 +24,6 @@ States:
 """
 
 import os
-import threading
 import time
 from typing import List, Optional
 
@@ -60,7 +62,8 @@ class CutJob:
     DONE     = 'done'
     ERROR    = 'error'
 
-    _CHUNK = 0x8000   # 32 KB — matches VPanel CFile::Read buffer
+    _CHUNK = 0x8000        # 32 KB — matches VPanel CFile::Read buffer
+    _WAIT_TIMEOUT = 10.0   # seconds to wait for NC counter to advance after a step block
 
     # ── Construction ──────────────────────────────────────────────────────────
 
@@ -70,10 +73,17 @@ class CutJob:
         self._filename = filename
         self._idx      = 0
         self._state    = self.IDLE
-        self._lock     = threading.Lock()
-        self._next     = threading.Event()   # fired by next_block() / start_run()
         self._error: Optional[str] = None
-        self._thr: Optional[threading.Thread] = None
+        self._bracket_open = False
+
+        # WAITING — set when a step block is sent.
+        self._wait_expected: int   = 0
+        self._wait_deadline: float = 0.0
+
+        # RUNNING — joined remaining-block payload + write offset.
+        self._payload: bytes           = b''
+        self._payload_start_idx: int   = 0
+        self._offset: int              = 0
 
     @classmethod
     def from_file(cls, machine: _machine.MDX40A, path: str) -> 'CutJob':
@@ -93,8 +103,7 @@ class CutJob:
 
     @property
     def state(self) -> str:
-        with self._lock:
-            return self._state
+        return self._state
 
     @property
     def block_idx(self) -> int:
@@ -118,138 +127,134 @@ class CutJob:
 
     def start_step(self) -> None:
         """Arm or switch to step mode (pause before each block)."""
-        with self._lock:
-            if self._state in (self.DONE, self.ERROR):
-                return
-            self._state = self.STEPPING
-        self._ensure_thread()
+        if self._state in (self.DONE, self.ERROR):
+            return
+        if self._state == self.RUNNING:
+            self._idx = self._idx_from_offset()
+        self._state = self.STEPPING
 
     def start_run(self) -> None:
-        """Switch to continuous bulk streaming."""
-        with self._lock:
-            if self._state in (self.DONE, self.ERROR):
-                return
-            self._state = self.RUNNING
-        self._next.set()
-        self._ensure_thread()
+        """Switch to continuous bulk streaming from the current block."""
+        if self._state in (self.DONE, self.ERROR):
+            return
+        if self._idx >= len(self._blocks):
+            self._state = self.DONE
+            self._close_bracket()
+            return
+        self._ensure_bracket()
+        self._payload           = b''.join(self._blocks[self._idx:])
+        self._payload_start_idx = self._idx
+        self._offset            = 0
+        self._state             = self.RUNNING
 
     def next_block(self) -> None:
-        """Send the next block (step mode)."""
-        self._next.set()
-
-    def pause(self) -> None:
-        """Switch from run to step mode after the current chunk finishes."""
-        with self._lock:
-            if self._state == self.RUNNING:
-                self._state = self.STEPPING
-
-    def abort(self) -> None:
-        """Stop immediately and enter ERROR state."""
-        with self._lock:
-            self._state = self.ERROR
-            self._error = 'aborted'
-        self._next.set()
-
-    # ── Background thread ─────────────────────────────────────────────────────
-
-    def _ensure_thread(self) -> None:
-        if self._thr is None or not self._thr.is_alive():
-            self._thr = threading.Thread(target=self._loop, daemon=True, name='cut')
-            self._thr.start()
-
-    def _loop(self) -> None:
-        while True:
-            with self._lock:
-                st  = self._state
-                idx = self._idx
-            if st in (self.DONE, self.ERROR):
-                return
-            if idx >= len(self._blocks):
-                with self._lock:
-                    self._state = self.DONE
-                return
-            if st == self.RUNNING:
-                self._run_bulk(idx)
-                return
-            if st == self.STEPPING:
-                self._step_one(idx)
-            else:
-                time.sleep(0.05)
-
-    def _run_bulk(self, start: int) -> None:
-        payload = b''.join(self._blocks[start:])
-        offset  = 0
-        try:
-            while offset < len(payload):
-                with self._lock:
-                    st = self._state
-                if st == self.ERROR:
-                    return
-                if st == self.STEPPING:
-                    # switched to pause mid-stream — find the enclosing block
-                    acc = 0
-                    for i, blk in enumerate(self._blocks[start:]):
-                        acc += len(blk)
-                        if acc > offset:
-                            with self._lock:
-                                self._idx = start + i
-                            break
-                    self._loop()
-                    return
-                chunk = payload[offset:offset + self._CHUNK]
-                self._m.bulk_write(chunk)
-                sent = offset + len(chunk)
-                acc  = 0
-                for i, blk in enumerate(self._blocks[start:]):
-                    acc += len(blk)
-                    if acc >= sent:
-                        with self._lock:
-                            self._idx = start + i + 1
-                        break
-                offset += len(chunk)
-        except Exception as exc:
-            with self._lock:
-                self._state = self.ERROR
-                self._error = str(exc)
+        """Send the next block (step mode). STEPPING → WAITING."""
+        if self._state != self.STEPPING:
             return
-        with self._lock:
-            self._idx   = len(self._blocks)
+        if self._idx >= len(self._blocks):
             self._state = self.DONE
-
-    def _step_one(self, idx: int) -> None:
-        self._next.clear()
-        self._next.wait()
-        self._next.clear()
-        with self._lock:
-            st = self._state
-        if st == self.ERROR:
+            self._close_bracket()
             return
-        if st == self.RUNNING:
-            self._loop()
-            return
-        with self._lock:
-            self._state = self.WAITING
-        block = self._blocks[idx]
+        block = self._blocks[self._idx]
         try:
+            self._ensure_bracket()
             before = self._m.get_nc_bytes_processed()
             self._m.bulk_write(block)
             if before >= 0:
-                expected = (before + len(block)) & 0xFFFFFFFF
-                deadline = time.monotonic() + 10.0
-                while time.monotonic() < deadline:
-                    with self._lock:
-                        if self._state == self.ERROR:
-                            return
-                    v = self._m.get_nc_bytes_processed()
-                    if v >= 0 and v == expected:
-                        break
-                    time.sleep(0.020)
+                self._wait_expected = (before + len(block)) & 0xFFFFFFFF
+                self._wait_deadline = time.monotonic() + self._WAIT_TIMEOUT
+                self._state         = self.WAITING
+            else:
+                # Counter read failed (e.g. mock mode); skip the wait and advance.
+                self._idx += 1
+                if self._idx >= len(self._blocks):
+                    self._state = self.DONE
+                    self._close_bracket()
         except Exception as exc:
-            with self._lock:
-                self._state = self.ERROR
-                self._error = str(exc)
+            self._set_error(str(exc))
+
+    def pause(self) -> None:
+        """Switch from run to step mode at the next chunk boundary."""
+        if self._state == self.RUNNING:
+            self._idx   = self._idx_from_offset()
+            self._state = self.STEPPING
+
+    def abort(self) -> None:
+        """Stop immediately and enter ERROR state."""
+        self._error = 'aborted'
+        self._state = self.ERROR
+        self._close_bracket()
+
+    # ── Per-tick service ──────────────────────────────────────────────────────
+
+    def service(self) -> None:
+        """Advance the state machine by one step. Call once per main-loop tick."""
+        st = self._state
+        if st == self.RUNNING:
+            self._service_running()
+        elif st == self.WAITING:
+            self._service_waiting()
+        # IDLE / STEPPING / DONE / ERROR: nothing to do
+
+    def _service_running(self) -> None:
+        if self._offset >= len(self._payload):
+            self._idx   = len(self._blocks)
+            self._state = self.DONE
+            self._close_bracket()
             return
-        with self._lock:
-            self._idx = idx + 1
-            if self._state not in (self.ERROR, self.RUNNING):
+        try:
+            chunk = self._payload[self._offset:self._offset + self._CHUNK]
+            self._m.bulk_write(chunk)
+            self._offset += len(chunk)
+            self._idx     = self._idx_from_offset()
+            if self._offset >= len(self._payload):
+                self._idx   = len(self._blocks)
+                self._state = self.DONE
+                self._close_bracket()
+        except Exception as exc:
+            self._set_error(str(exc))
+
+    def _service_waiting(self) -> None:
+        v = self._m.get_nc_bytes_processed()
+        if v >= 0 and v == self._wait_expected:
+            self._idx += 1
+            if self._idx >= len(self._blocks):
+                self._state = self.DONE
+                self._close_bracket()
+            else:
                 self._state = self.STEPPING
+            return
+        if time.monotonic() > self._wait_deadline:
+            self._set_error(
+                f"timeout waiting for NC counter (have {v}, expected {self._wait_expected})"
+            )
+
+    # ── Internal helpers ──────────────────────────────────────────────────────
+
+    def _ensure_bracket(self) -> None:
+        if not self._bracket_open:
+            self._m.begin_nc_job()
+            self._bracket_open = True
+
+    def _close_bracket(self) -> None:
+        if self._bracket_open:
+            self._m.end_nc_job()
+            self._bracket_open = False
+
+    def _set_error(self, msg: str) -> None:
+        self._error = msg
+        self._state = self.ERROR
+        self._close_bracket()
+
+    def _idx_from_offset(self) -> int:
+        """Index of the first block whose end is past the current write offset.
+
+        Used when pausing mid-stream so next_block() resumes at the block
+        enclosing the current offset (matching VPanel's behaviour).
+        """
+        acc = 0
+        for i, blk in enumerate(self._blocks[self._payload_start_idx:]):
+            acc += len(blk)
+            if acc > self._offset:
+                return self._payload_start_idx + i
+        return len(self._blocks)

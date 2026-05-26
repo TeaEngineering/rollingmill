@@ -1,17 +1,18 @@
 """
 Roland MDX-40A machine interface.
 
-MDX40A manages a background polling thread (200 ms) that reads machine state
-and notifies registered observers via callbacks.  All USB interaction goes
-through mdx40a.usb primitives — no direct libusb calls here.
+Single-threaded: the caller (typically the TUI curses main loop) drives state
+polling by calling MDX40A.poll() on a cadence (recommended POLL_INTERVAL).
+poll() reads the state block, fires registered observers, and refreshes the
+spindle-time counter once per minute.  All USB interaction goes through
+mdx40a.usb primitives — no direct libusb calls here.
 """
 
 import logging
 import struct
-import threading
 import time
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional
+from typing import Optional
 
 import usb.core
 
@@ -19,7 +20,7 @@ from . import usb as _usb
 
 log = logging.getLogger(__name__)
 
-POLL_INTERVAL = 0.200   # seconds
+POLL_INTERVAL = 0.200   # seconds — recommended cadence for caller of MDX40A.poll()
 
 # Jog speeds (mm/min). VPanel sends 0xFFFF (max) for single-press steps;
 # for a meaningful slow/fast difference we use VPanel's continuous-ramp bounds.
@@ -78,8 +79,11 @@ _PING_BIT21      = 0x00200000   # bit 21 alone — "command acknowledged" flag p
 #  18-16   0x00070000  STATE      machine state enum
 #                                   2 = idle / normal
 #                                   3 = motion commanded (triggers origin update on→2)
-#  bit 13  0x00002000  BUSY       motion in progress (wait_motion_complete_loop exit)
-#  bit 12  0x00001000  ERROR      error condition (loop returns failure)
+#  bit 13  0x00002000  (always set in observed states — semantic unclear; do NOT
+#                       gate motion completion on this. VPanel's
+#                       jog_wait_busy_bits_clear @ 0x00417b00 actually polls
+#                       ping word bits 2 and 21, not this state-block bit.)
+#  bit 12  0x00001000  ERROR      error condition
 #  bit 23  0x00800000  ]
 #  bit 17  0x00020000  ] constant in all observed states — likely axis-present or
 #  bit 11  0x00000800  ] hw-config flags set at power-on; ignore for status display
@@ -139,8 +143,8 @@ class MDX40A:
 
         machine = MDX40A()
         machine.connect()
-        machine.on_state(lambda s: print(s))
-        machine.jog('Z', -2.0)   # move 2 mm down
+        machine.poll()            # refresh state and ping caches
+        machine.send_jog('Z', -2.0)   # move 2 mm down (fire-and-forget)
         machine.release()
     """
 
@@ -148,11 +152,8 @@ class MDX40A:
         self._dev = None
         self._intf_num: Optional[int] = None
         self._state = MachineState()
-        self._state_lock = threading.Lock()
-        self._usb_lock = threading.Lock()   # serialises all USB control transfers
-        self._observers: List[Callable[[MachineState], None]] = []
-        self._poll_thread: Optional[threading.Thread] = None
-        self._stop_event = threading.Event()
+        self._last_ping_word: Optional[int] = None   # most recent GET 0x0001 (uint32 LE); see is_busy
+        self._spindle_tick: int = 0          # increments per poll(); refreshes spindle time every _SPINDLE_POLL_EVERY ticks
         self._spindle_speed_pct: int = 100   # cached spindle override %
         self._cutting_feed_pct: int = 100    # cached cutting feed override %
         self._spindle_target_rpm: int = SPINDLE_RPM_MIN  # configured target RPM (GET/SET 0x3900/0x3901)
@@ -177,19 +178,9 @@ class MDX40A:
         self._intf_num = _usb.claim(dev)
         log.debug("Claimed interface %d", self._intf_num)
         self._handshake()
-        self._stop_event.clear()
-        self._poll_thread = threading.Thread(
-            target=self._poll_loop, name="mdx40a-poll", daemon=True
-        )
-        self._poll_thread.start()
-        log.info("Polling thread started")
 
     def release(self) -> None:
-        """Stop the polling thread and release the USB interface."""
-        self._stop_event.set()
-        if self._poll_thread:
-            self._poll_thread.join(timeout=2.0)
-            self._poll_thread = None
+        """Release the USB interface."""
         if self._dev is not None and self._intf_num is not None:
             _usb.release(self._dev, self._intf_num)
             log.info("Interface %d released", self._intf_num)
@@ -206,52 +197,60 @@ class MDX40A:
 
     @property
     def state(self) -> MachineState:
-        with self._state_lock:
-            return self._state
+        return self._state
 
-    def on_state(self, callback: Callable[[MachineState], None]) -> None:
-        """Register a callback invoked on every successful poll."""
-        self._observers.append(callback)
+    # ── Poll handoff ──────────────────────────────────────────────────────────
+
+    def poll(self) -> Optional[MachineState]:
+        """Service one poll tick — refresh state block + ping word, refresh
+        spindle time periodically.
+
+        Caller is expected to invoke this on a cadence (~POLL_INTERVAL seconds).
+        Two USB reads happen each tick:
+          - _read_state()  : GET 0x0100, caches MachineState on self._state.
+          - _ping_status() : GET 0x0001, caches uint32 on self._last_ping_word.
+            The ping word drives jog-end detection (TUI consults self.is_busy,
+            which derives from the cached value).
+        """
+        s = self._read_state()
+        self._ping_status()
+        self._spindle_tick += 1
+        if self._spindle_tick >= self._SPINDLE_POLL_EVERY:
+            self._spindle_tick = 0
+            secs = self.get_spindle_time()
+            if secs is not None:
+                self._spindle_secs = secs
+        return s
 
     # ── Jog ──────────────────────────────────────────────────────────────────
 
-    def jog(
+    def send_jog(
         self,
         axis: str,
         dist_mm: float,
         speed: int = JOG_SPEED_SLOW,
-        timeout: float = 30.0,
-    ) -> MachineState:
-        """
-        Move `axis` by `dist_mm` relative to current machine position.
+    ) -> None:
+        """Send a relative-displacement jog and return immediately.
 
-        Blocks until the axis settles or `timeout` seconds elapse.
-        axis: 'X', 'Y', 'Z', or 'A' (A in degrees)
+        Fire-and-forget: the caller observes completion via the regular poll()
+        cycle (state flags FLAG_MOVING / FLAG_CMD_MOVE).
+        axis: 'X', 'Y', 'Z', or 'A' (A in degrees).
         """
         axis = axis.upper()
         if axis not in ('X', 'Y', 'Z', 'A'):
             raise ValueError(f"axis must be X/Y/Z/A, got {axis!r}")
-
-        with self._state_lock:
-            s = self._state
-        if not s.ready:
-            raise RuntimeError("Machine state not yet available; connect first")
-
-        # Build relative displacement vector (1/1000 mm units).
-        # wValue=0x4f5 takes a displacement, not an absolute target.
-        # Only the jogged axis is non-zero; others are 0.
+        # Relative displacement vector (1/1000 mm units). wValue=0x4f5 takes a
+        # displacement, not an absolute target — only the jogged axis is non-zero.
         delta = round(dist_mm * 1000)
         dx = delta if axis == 'X' else 0
         dy = delta if axis == 'Y' else 0
         dz = delta if axis == 'Z' else 0
         da = delta if axis == 'A' else 0
-
         log.info(
             "Jog %s %+.3f mm  delta=[%d,%d,%d,%d]  speed=%d",
             axis, dist_mm, dx, dy, dz, da, speed,
         )
         self._send_jog(speed, dx, dy, dz, da)
-        return self._wait_settle(axis, timeout)
 
     def _set_operation_mode(self, active: bool) -> None:
         """SET 0x1109 operation bracket (RE: FUN_0041c410).
@@ -262,8 +261,7 @@ class MDX40A:
         """
         payload = b'\x00' if active else b'\xff'
         try:
-            with self._usb_lock:
-                _usb.vend_set(self._dev, 0x1109, payload)
+            _usb.vend_set(self._dev, 0x1109, payload)
             log.debug("Operation mode: %s", "begin (0x00)" if active else "end (0xff)")
         except usb.core.USBError as e:
             log.warning("SET 0x1109 failed: %s", e)
@@ -276,56 +274,55 @@ class MDX40A:
         is the absolute-position form used only in multi-step milling sequences).
         """
         payload = struct.pack('>HH4i', speed, 0x0000, x, y, z, a)
-        with self._usb_lock:
-            _usb.vend_set(self._dev, 0x04f5, payload)
+        _usb.vend_set(self._dev, 0x04f5, payload)
         log.debug("Jog cmd sent: %s", payload.hex())
 
-    def _ping_status(self) -> int:
-        """Read 4-byte ping status word (GET wValue=0x0001). Returns -1 on error."""
-        try:
-            with self._usb_lock:
-                data = _usb.vend_get(self._dev, 0x0001, 4)
-            if len(data) < 4:
-                return -1
-            return struct.unpack_from('<I', data)[0]
-        except usb.core.USBError:
-            return -1
+    def _ping_status(self) -> Optional[int]:
+        """Read the 4-byte ping word (GET wValue=0x0001), cache it on self, return it.
 
-    def _wait_motion_complete(self, timeout: float) -> bool:
-        """Wait for jog motion to complete (RE: jog_wait_busy_bits_clear @ 0x00417b00).
+        Single canonical reader for the 0x0001 register — every caller that
+        polls it goes through here:
+          - _wait_ping_bit21 — command-ack polling (bit 21)
+          - get_spindle_time — response-length wait (high byte)
+          - poll() — refreshes the cache so the TUI's jog-end detection (which
+            reads self.last_ping_word) sees a fresh value each tick.
 
-        Polls ping every 100 ms until bits 2 and 21 (0x00200004) are clear for
-        two consecutive readings, then sends the motion-done ack.
+        The cached value drives the jog-end check: VPanel's
+        jog_wait_busy_bits_clear @ 0x00417b00 loops while bits 2 or 21 of this
+        word are set, so jog completion = (last_ping_word & 0x00200004) == 0.
 
-        Fast moves that finish before the first poll are handled correctly: BUSY
-        will already be clear, so two consecutive clear readings happen immediately.
+        Returns the uint32 (LE-decoded), or None on USB error / short response.
         """
-        deadline = time.monotonic() + timeout
-        last_clear = False
-        while time.monotonic() < deadline:
-            time.sleep(0.100)
-            ping = self._ping_status()
-            if ping == -1:
-                log.warning("Ping read failed during motion wait")
-                last_clear = False
-                continue
-            log.debug("Motion wait ping: 0x%08X  busy=%s", ping, bool(ping & _PING_BUSY_MASK))
-            if ping & _PING_ERROR_MASK:
-                log.warning("Ping error bit in motion wait (0x%08X)", ping)
-                return False
-            now_clear = (ping & _PING_BUSY_MASK) == 0
-            if now_clear and last_clear:
-                log.debug("Motion complete")
-                return True
-            last_clear = now_clear
-        log.warning("Motion wait timed out after %.1f s", timeout)
-        return False
+        try:
+            data = _usb.vend_get(self._dev, 0x0001, 4)
+            if len(data) < 4:
+                return None
+            word = struct.unpack_from('>I', data)[0]
+            self._last_ping_word = word
+            return word
+        except usb.core.USBError:
+            return None
+
+    @property
+    def last_ping_word(self) -> Optional[int]:
+        """Most recently read 0x0001 ping word, or None before the first read."""
+        return self._last_ping_word
+
+    @property
+    def is_busy(self) -> bool:
+        """True if the firmware reports motion-in-progress on the latest ping.
+
+        Bits 2 or 21 of GET 0x0001 — the same exit condition VPanel's
+        jog_wait_busy_bits_clear polls. Returns False when no ping has been
+        received yet (treat unknown as 'not busy').
+        """
+        p = self._last_ping_word
+        return p is not None and (p & _PING_BUSY_MASK) != 0
 
     def stop_motion(self) -> None:
         """Send immediate motion stop (SET wValue=0x03f3)."""
         try:
-            with self._usb_lock:
-                _usb.vend_set(self._dev, 0x03f3)
+            _usb.vend_set(self._dev, 0x03f3)
             log.info("Motion stop sent (SET 0x03f3)")
         except usb.core.USBError as e:
             log.warning("Motion stop failed: %s", e)
@@ -347,8 +344,7 @@ class MDX40A:
         Returns RPM as uint32 (big-endian from device), or None on error.
         """
         try:
-            with self._usb_lock:
-                data = _usb.trigger_read_b(self._dev, 0x3900, 4)
+            data = _usb.trigger_read_b(self._dev, 0x3900, 4)
             if data is None or len(data) < 4:
                 log.warning("get_spindle_rpm: short/no response")
                 return None
@@ -370,8 +366,7 @@ class MDX40A:
         rpm = max(SPINDLE_RPM_MIN, min(SPINDLE_RPM_MAX, int(rpm)))
         self._spindle_target_rpm = rpm   # optimistic update before USB
         try:
-            with self._usb_lock:
-                _usb.vend_set(self._dev, 0x3006, struct.pack('>I', rpm))
+            _usb.vend_set(self._dev, 0x3006, struct.pack('>I', rpm))
             log.info("Spindle spindle on RPM %d", rpm)
             self._wait_ping_bit21()
         except usb.core.USBError as e:
@@ -380,8 +375,7 @@ class MDX40A:
     def spindle_off(self) -> None:
         """Stop spindle motor off."""
         try:
-            with self._usb_lock:
-                _usb.vend_set(self._dev, 0x3006, struct.pack('>I', 0))
+            _usb.vend_set(self._dev, 0x3006, struct.pack('>I', 0))
             log.info("Spindle off")
         except usb.core.USBError as e:
             log.warning("spindle_off failed: %s", e)
@@ -396,8 +390,7 @@ class MDX40A:
         """
         payload = struct.pack('<HH', 1, 0xFFFF) if enabled else struct.pack('<HH', 0, 0)
         try:
-            with self._usb_lock:
-                _usb.vend_set(self._dev, 0x3809, payload)
+            _usb.vend_set(self._dev, 0x3809, payload)
             log.info("Rotary drilling mode %s (SET 0x3809 %s)",
                      "ON" if enabled else "OFF",
                      "[1, 0xFFFF]" if enabled else "[0, 0]")
@@ -409,8 +402,7 @@ class MDX40A:
         pct = max(10, min(200, int(pct)))
         self._spindle_speed_pct = pct
         try:
-            with self._usb_lock:
-                _usb.vend_set(self._dev, 0x3008, bytes([pct]))
+            _usb.vend_set(self._dev, 0x3008, bytes([pct]))
             log.info("Spindle speed set to %d%%", pct)
         except usb.core.USBError as e:
             log.warning("set_spindle_speed failed: %s", e)
@@ -432,8 +424,7 @@ class MDX40A:
         pct = max(10, min(200, int(pct)))
         self._cutting_feed_pct = pct
         try:
-            with self._usb_lock:
-                _usb.vend_set(self._dev, 0x0307, bytes([pct]))
+            _usb.vend_set(self._dev, 0x0307, bytes([pct]))
             log.info("Cutting feed rate set to %d%%", pct)
         except usb.core.USBError as e:
             log.warning("set_cutting_feed failed: %s", e)
@@ -443,40 +434,15 @@ class MDX40A:
     def get_spindle_time(self) -> Optional[int]:
         """Read total spindle rotation time from the machine.
 
-        RE: setup_dlg_show_spindle_time / get_status_struct_0x2405 in VP_MDX40A.exe.
-        Mirrors dev_trigger_read → dev_send_trigger + FUN_0041b990 + dev_read_response:
-          1. SET 0x2405  — prime the device
-          2. Poll GET 0x0001 until ping byte[3] (C's LE high byte) goes non-zero;
-             that byte IS the response length (FUN_0041b990, 3 s timeout).
-          3. GET 0x0003 of that many bytes — first uint32 (big-endian) = seconds.
-
         Returns total seconds, or None on error / timeout.
+        GET 0x2405 data (58124, 58124, 0, 0, 0)
+        GET 0x2405 data (58124, 58124, 0, 0, 0)
         """
         try:
-            with self._usb_lock:
-                _usb.vend_set(self._dev, 0x2405)
-                deadline = time.monotonic() + 3.0
-                length = 0
-                while time.monotonic() < deadline:
-                    ping = _usb.vend_get(self._dev, 0x0001, 4)
-                    if len(ping) >= 4:
-                        log.debug("get_spindle_time: ping %s", bytes(ping).hex())
-                        if ping[2] & 0x10:   # bit 20 = device error (bit 4 of byte[2])
-                            log.warning("get_spindle_time: error bit in ping %s",
-                                        bytes(ping).hex())
-                            return None
-                        length = ping[3]     # C LE high byte = response length
-                        if length:
-                            break
-                    time.sleep(0.020)
-                if not length:
-                    log.warning("get_spindle_time: timeout waiting for device response")
-                    return None
-                data = _usb.vend_get(self._dev, 0x0003, min(length, 16))
-            if len(data) < 4:
-                log.warning("get_spindle_time: short response (%d bytes)", len(data))
-                return None
-            seconds = struct.unpack_from('>I', data, 0)[0]
+            data = _usb.trigger_read_b(self._dev, 0x2405, 16)
+            vals = struct.unpack('>IIHHHxx', data)
+            # log.info(f"GET 0x2405 data {vals}")
+            seconds = vals[0]
             log.debug("Spindle time: %d s  (%dh %02dm)", seconds, seconds // 3600, (seconds // 60) % 60)
             return seconds
         except usb.core.USBError as e:
@@ -497,20 +463,17 @@ class MDX40A:
           - FUN_004042e0: same bit is the motion-complete wait exit condition
 
         Returns tuple of 6 LE uint32s, or None on error/timeout.
+        GET 0x3804: (50000, 0, 0, 250000, 0, 0)
         """
         try:
-            with self._usb_lock:
-                data = _usb.trigger_read_b(self._dev, 0x3804, 24)
+            data = _usb.trigger_read_b(self._dev, 0x3804, 24)
             if data is None or len(data) < 24:
                 log.warning("get_device_status_0x3804: short/no response (%s)",
                             None if data is None else len(data))
                 return None
             vals = struct.unpack_from('>6I', bytes(data))
             busy = bool(vals[0] & 0x04)
-            log.info(
-                "GET 0x3804: [%s]  word0=0x%08x  busy(bit2)=%s",
-                ' '.join(f'{v:08x}' for v in vals), vals[0], busy,
-            )
+            log.info(f"GET 0x3804: {vals}")
             return vals
         except usb.core.USBError as e:
             log.warning("get_device_status_0x3804 failed: %s", e)
@@ -522,13 +485,12 @@ class MDX40A:
         RE: wait_ping_bit21_clear (FUN_0041b930) in VP_MDX40A.exe, 3 s timeout.
         Used after SET 0x3901 (spindle RPM), SET 0x2425 (reset spindle time),
         SET 0x3107 (axis config), SET 0x347b-0x3482 (axis params), SET 0x2012 (limits).
-        Must NOT be called while holding _usb_lock; _ping_status() acquires it internally.
         """
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             time.sleep(0.050)
             ping = self._ping_status()
-            if ping == -1:
+            if ping is None:
                 continue
             if ping & _PING_ERROR_MASK:
                 log.warning("_wait_ping_bit21: error bit set (0x%08X)", ping)
@@ -547,8 +509,7 @@ class MDX40A:
         Returns True if acknowledged within timeout.
         """
         try:
-            with self._usb_lock:
-                _usb.vend_set(self._dev, 0x2425)
+            _usb.vend_set(self._dev, 0x2425)
             log.info("Spindle time reset sent (SET 0x2425)")
         except usb.core.USBError as e:
             log.warning("reset_spindle_time failed: %s", e)
@@ -585,8 +546,7 @@ class MDX40A:
             raise ValueError(f"WCS slot must be 1–10, got {slot}")
         wv = _WCS_READ_WVAL[slot - 1]
         try:
-            with self._usb_lock:
-                data = _usb.trigger_read_b(self._dev, wv, 16)
+            data = _usb.trigger_read_b(self._dev, wv, 16)
             if data is None or len(data) < 16:
                 log.warning("get_wcs_origin(%d): short/no response", slot)
                 return None
@@ -605,8 +565,6 @@ class MDX40A:
         if not 0 <= slot <= 10:
             raise ValueError(f"WCS slot must be 0–10, got {slot}")
         try:
-            # with self._usb_lock:
-            #     pass
             log.info("Active WCS → %d", slot)
             self._active_wcs = slot
             if slot == 0:
@@ -631,8 +589,7 @@ class MDX40A:
         try:
             if target != self._active_wcs:
                 self._active_wcs = target
-            with self._usb_lock:
-                _usb.vend_set(self._dev, 0x3f2)
+            _usb.vend_set(self._dev, 0x3f2)
             log.info("Origin captured into WCS%d", target)
             origin = self.get_wcs_origin(target)
             if origin:
@@ -660,8 +617,7 @@ class MDX40A:
             round(z_mm * 1000), round(a_deg * 1000),
         )
         try:
-            with self._usb_lock:
-                _usb.vend_set(self._dev, wv, payload)
+            _usb.vend_set(self._dev, wv, payload)
             log.info("WCS%d origin written: (%.3f, %.3f, %.3f, %.3f°)",
                      slot, x_mm, y_mm, z_mm, a_deg)
             if slot == self._active_wcs:
@@ -680,8 +636,7 @@ class MDX40A:
         results = []
         for i, wv in enumerate(_TOOL_OFFSET_READ_WVAL, 1):
             try:
-                with self._usb_lock:
-                    data = _usb.trigger_read_b(self._dev, wv, 4)
+                data = _usb.trigger_read_b(self._dev, wv, 4)
                 if data is None or len(data) < 4:
                     log.warning("get_tool_offset(%d): short/no response", i)
                     results.append(None)
@@ -704,8 +659,7 @@ class MDX40A:
         wv = _TOOL_OFFSET_WRITE_WVAL[slot - 1]
         raw = max(0, round(value_mm * 1000))
         try:
-            with self._usb_lock:
-                _usb.vend_set(self._dev, wv, struct.pack('>I', raw))
+            _usb.vend_set(self._dev, wv, struct.pack('>I', raw))
             log.info("Tool offset T%d → %.3f mm (raw %d)", slot, value_mm, raw)
         except usb.core.USBError as e:
             log.warning("set_tool_offset(%d) failed: %s", slot, e)
@@ -721,7 +675,8 @@ class MDX40A:
 
         RE: FUN_00419ef0 @ 0x00419ef0 — absolute position move (flags=0xFFFF),
         wrapped in operation bracket SET 0x1109 (0x00 begin / 0xff end).
-        The TUI passes machine coords here; callers convert from WCS if needed.
+        Fire-and-forget: returns once the four control transfers are sent;
+        the caller observes motion completion via subsequent poll() cycles.
         """
         payload = struct.pack(
             '>HH4i', speed, 0xFFFF,
@@ -729,28 +684,18 @@ class MDX40A:
             round(z_mm * 1000), round(a_deg * 1000),
         )
         try:
-            with self._usb_lock:
-                _usb.vend_set(self._dev, 0x1109, b'\x00')
-                _usb.vend_set(self._dev, 0x04f7, payload)
-                _usb.vend_set(self._dev, 0x3f2)
-                _usb.vend_set(self._dev, 0x1109, b'\xff')
+            _usb.vend_set(self._dev, 0x1109, b'\x00')
+            _usb.vend_set(self._dev, 0x04f7, payload)
+            _usb.vend_set(self._dev, 0x3f2)
+            _usb.vend_set(self._dev, 0x1109, b'\xff')
             log.info("Move to machine (%.3f, %.3f, %.3f, %.3f°) speed=%d",
                      x_mm, y_mm, z_mm, a_deg, speed)
         except usb.core.USBError as e:
             log.warning("move_to_machine_pos failed: %s", e)
 
-    def _wait_settle(self, axis: str, timeout: float) -> MachineState:
-        """Wait for motion to complete using firmware ping bits, then read final position."""
-        completed = self._wait_motion_complete(timeout)
-        s = self.state
-        pos = {'X': s.x_mm, 'Y': s.y_mm, 'Z': s.z_mm, 'A': s.a_deg}[axis]
-        if completed:
-            log.info("Jog complete: %s=%.3f mm", axis, pos)
-        else:
-            log.warning("Jog %s timed out; position is %.3f mm", axis, pos)
-        return s
-
     # ── Internal ─────────────────────────────────────────────────────────────
+
+    _SPINDLE_POLL_EVERY = round(60.0 / POLL_INTERVAL)  # poll() calls between spindle-time reads
 
     def _handshake(self) -> None:
         """Perform the VPanel startup sequence."""
@@ -777,29 +722,23 @@ class MDX40A:
             log.debug("SOFT_RESET not supported or failed: %s", e)
 
         # Ping
-        try:
-            with self._usb_lock:
-                data = _usb.vend_get(dev, 0x0001, 4)
-            log.debug("Ping (GET 0x0001): %s", bytes(data).hex())
-        except usb.core.USBError as e:
-            log.warning("Ping failed: %s", e)
+        self._ping_status()
 
-        # Machine type
+        # Endian detection, 4 byte read should be 0x1234
         try:
-            with self._usb_lock:
-                data = _usb.vend_get(dev, 0x0002, 4)
-            sig = (data[2] << 8) | data[3]
+            data = _usb.vend_get(dev, 0x0002, 4)
+            _,_,sig = struct.unpack(">BBH", data)
             if sig == 0x1234:
-                log.info("Machine type confirmed (sig=0x1234)")
+                log.info("Machine endian confirmed (sig=0x1234)")
             else:
-                log.warning("Unexpected machine type sig=0x%04X (want 0x1234)", sig)
+                print("Unexpected machine endian sig=0x%04X (want 0x1234)", sig)
+                exit(-1)
         except usb.core.USBError as e:
             log.warning("Machine type check failed: %s", e)
 
         # Keepalive — VPanel sends 1 byte payload (poll_keepalive @ 0041c3d0)
         try:
-            with self._usb_lock:
-                _usb.vend_set(dev, 0x03f5, b'\x00')
+            _usb.vend_set(dev, 0x03f5, b'\x00')
             log.debug("Keepalive sent")
         except usb.core.USBError as e:
             log.warning("Keepalive failed: %s", e)
@@ -816,29 +755,35 @@ class MDX40A:
             log.info("Spindle RPM read failed or out of range (%s); defaulting to %d", rpm, SPINDLE_RPM_MIN)
 
     def _read_state(self) -> Optional[MachineState]:
-        """Read machine state, mirroring VPanel's 200ms poll then XYZA read.
+        """Read the 0x0100 state block (XYZA coords + flags) and cache on self._state.
 
-        VPanel poll (FUN_00403710): SET 0x03f5 (keepalive, 1-byte payload) then Pattern B
-        trigger reads for 0x3005/0x3800/0x3003/0x3b01 — each is SET wValue → GET 0x0003.
-        We use trigger_read (immediate GET, no ping-poll wait) because ping[3] never goes
-        non-zero on macOS/libusb. The machine still needs the complete SET→GET cycle.
-        XYZA state (GET 0x0100) is a separate Pattern A direct read after the poll.
+        Sequence mirrors VPanel's 200 ms poll (FUN_00403710): SET 0x03f5
+        keepalive, then Pattern B trigger reads for 0x3005/0x3800/0x3003/0x3b01
+        (SET wValue → GET 0x0003 — we issue the GET immediately because
+        ping[3] never goes non-zero on macOS/libusb, but the firmware still
+        needs the complete SET→GET cycle). XYZA state (GET 0x0100) is a
+        Pattern A direct read at the end.
+
+        Distinct from _ping_status(), which reads the separate 4-byte ping
+        register at 0x0001 (motion-busy / command-ack / response-length).
         """
         try:
-            with self._usb_lock:
-                _usb.vend_set(self._dev, 0x03f5, b'\x00')
-                for wv, n in ((0x3005, 8), (0x3800, 1), (0x3003, 4), (0x3b01, 4)):
-                    try:
-                        raw = _usb.trigger_read(self._dev, wv, n)
-                        if raw is not None and wv == 0x3800 and len(raw):
-                            log.debug("GET 0x3800 status byte: 0x%02x", raw[0])
-                    except usb.core.USBError as e:
-                        log.debug("Poll read 0x%04x failed: %s", wv, e)
-                data = _usb.vend_get(self._dev, 0x0100, 32)
+            _usb.vend_set(self._dev, 0x03f5, b'\x00')
+            for wv, n in ((0x3005, 8), (0x3800, 1), (0x3003, 4), (0x3b01, 4)):
+                try:
+                    raw = _usb.trigger_read(self._dev, wv, n)
+                    if raw is not None and len(raw):
+                        log.debug(f"GET 0x{wv:0x} returned: {raw}")
+                except usb.core.USBError as e:
+                    log.debug("Poll read 0x%04x failed: %s", wv, e)
+
+            data = _usb.vend_get(self._dev, 0x0100, 32)
             if len(data) < 20:
                 log.debug("Short state response (%d bytes)", len(data))
                 return None
-            return _decode_state(data)
+            s = _decode_state(data)
+            self._state = s
+            return s
         except usb.core.USBTimeoutError:
             log.debug("State read timeout")
             return None
@@ -846,36 +791,23 @@ class MDX40A:
             log.debug("State read error: %s", e)
             return None
 
-    _SPINDLE_POLL_EVERY = round(60.0 / POLL_INTERVAL)  # ticks between spindle-time reads
-
-    def _poll_loop(self) -> None:
-        spindle_tick = 0
-        while not self._stop_event.is_set():
-            s = self._read_state()
-            if s is not None:
-                with self._state_lock:
-                    self._state = s
-                for cb in self._observers:
-                    try:
-                        cb(s)
-                    except Exception:
-                        log.exception("Observer callback raised")
-            spindle_tick += 1
-            if spindle_tick >= self._SPINDLE_POLL_EVERY:
-                spindle_tick = 0
-                secs = self.get_spindle_time()
-                if secs is not None:
-                    self._spindle_secs = secs
-            self._stop_event.wait(POLL_INTERVAL)
-
     # ── NC / RML file output ──────────────────────────────────────────────────
 
-    def bulk_write(self, data: bytes) -> int:
-        """Write raw bytes to the bulk-OUT endpoint (NC/RML command stream).
+    def begin_nc_job(self) -> None:
+        """Open NC operation bracket (SET 0x1109 = 0x00) before bulk data.
 
-        Does not acquire _usb_lock — bulk-OUT is a separate USB pipe from the
-        vendor control transfers used for state polling.
+        RE: execute_cut_job @ 0x00416360 calls send_operation_bracket_0x1109
+        with 0x00 before starting the NC job. Without this the firmware ignores
+        bulk NC data. Pair with end_nc_job() when all data has been sent.
         """
+        self._set_operation_mode(True)
+
+    def end_nc_job(self) -> None:
+        """Close NC operation bracket (SET 0x1109 = 0xFF) after bulk data."""
+        self._set_operation_mode(False)
+
+    def bulk_write(self, data: bytes) -> int:
+        """Write raw bytes to the bulk-OUT endpoint (NC/RML command stream)."""
         return _usb.bulk_write(self._dev, data)
 
     def get_nc_bytes_processed(self) -> int:
@@ -886,8 +818,7 @@ class MDX40A:
         Returns unsigned 32-bit counter, or -1 on error.
         """
         try:
-            with self._usb_lock:
-                data = _usb.trigger_read(self._dev, 0x0200, 4)
+            data = _usb.trigger_read(self._dev, 0x0200, 4)
             if data and len(data) >= 4:
                 return struct.unpack('>I', bytes(data[:4]))[0]
         except usb.core.USBError as e:

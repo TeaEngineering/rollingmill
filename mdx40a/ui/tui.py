@@ -33,7 +33,6 @@ import argparse
 import collections
 import curses
 import logging
-import threading
 import time
 from typing import List, Optional, Tuple
 
@@ -80,19 +79,16 @@ class _LogBuffer(logging.Handler):
     def __init__(self, maxlines: int = 500):
         super().__init__()
         self._lines: collections.deque = collections.deque(maxlen=maxlines)
-        self._lock  = threading.Lock()
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
             text = self._FMT.format(record)
         except Exception:
             text = record.getMessage()
-        with self._lock:
-            self._lines.append((record.levelno, text))
+        self._lines.append((record.levelno, text))
 
     def tail(self, n: int) -> List[Tuple[int, str]]:
-        with self._lock:
-            return list(self._lines)[-n:]
+        return list(self._lines)[-n:]
 
 
 # ── TUI ───────────────────────────────────────────────────────────────────────
@@ -103,9 +99,11 @@ class TUI:
         self._log          = log_buf
         self._step_i       = 2           # index into STEPS_LINEAR / STEPS_ROTARY (default 1.0mm / 1.0°)
         self._fast         = False
-        self._moving       : Optional[str]             = None   # axis currently jogging
-        self._jog_thr      : Optional[threading.Thread] = None
-        self._quit         = threading.Event()
+        self._moving       : Optional[str] = None   # axis currently jogging (None → idle)
+        self._jog_armed    = False                   # True between send_jog() and post-motion settle
+        self._jog_sent_at  = 0.0                     # monotonic timestamp of last send_jog()
+        self._quit         = False
+        self._last_poll    = 0.0                     # monotonic timestamp of last machine.poll()
         # WCS overlay dialog state
         self._wcs_open           = False
         self._wcs_sel            = 0        # selected row: 0=MCS, 1-10=WCS1-10
@@ -128,9 +126,9 @@ class TUI:
         self._init_colors()
         curses.curs_set(0)
         stdscr.nodelay(True)
-        stdscr.timeout(100)     # getch() returns every 100 ms so the screen refreshes
+        stdscr.timeout(100)     # getch() returns every 100 ms — our cooperative tick
 
-        while not self._quit.is_set():
+        while not self._quit:
             try:
                 key = stdscr.getch()
             except curses.error:
@@ -145,6 +143,16 @@ class TUI:
                 self._coord_entry_pending = False
                 self._coord_entry_dialog(stdscr)
                 stdscr.clear()
+
+            # Ping handoff — drive machine polling from the main loop.
+            now = time.monotonic()
+            if now - self._last_poll >= _machine.POLL_INTERVAL:
+                self._m.poll()
+                self._last_poll = now
+                self._update_jog_indicator()
+
+            if self._cut_job:
+                self._cut_job.service()
 
             self._draw(stdscr)
 
@@ -194,7 +202,7 @@ class TUI:
                 self._m.stop_motion()
             if self._cut_job:
                 self._cut_job.abort()
-            self._quit.set()
+            self._quit = True
             return
 
         # NC cut panel keys (when a file is loaded)
@@ -262,8 +270,8 @@ class TUI:
             self._tool_open_dialog()
 
     def _start_jog(self, axis: str, sign: int) -> None:
-        if self._jog_thr and self._jog_thr.is_alive():
-            return  # previous jog still settling — ignore
+        if self._jog_armed:
+            return  # previous jog still settling — ignore (no overlap)
         step  = STEPS_ROTARY[self._step_i] if axis == 'A' else STEPS_LINEAR[self._step_i]
         dist  = sign * step
         speed = _machine.JOG_SPEED_FAST if self._fast else _machine.JOG_SPEED_SLOW
@@ -273,19 +281,45 @@ class TUI:
             unit = '°' if axis == 'A' else 'mm'
             t.annotate(f"JOG {axis} {dist:+.3f}{unit}  speed={speed}  cmd=0x4f5/displacement")
 
-        log = logging.getLogger('tui')
+        try:
+            self._m.send_jog(axis, dist, speed=speed)
+        except Exception as exc:
+            logging.getLogger('tui').error("Jog %s %+.3f mm failed: %s", axis, dist, exc)
+            return
+        self._moving     = axis
+        self._jog_armed  = True
+        self._jog_sent_at = time.monotonic()
 
-        def _run():
-            self._moving = axis
-            try:
-                self._m.jog(axis, dist, speed=speed)
-            except Exception as exc:
-                log.error("Jog %s %+.3f mm failed: %s", axis, dist, exc)
-            finally:
-                self._moving = None
+    def _update_jog_indicator(self) -> None:
+        """Clear the moving marker once the firmware reports the axes idle.
 
-        self._jog_thr = threading.Thread(target=_run, daemon=True, name='jog')
-        self._jog_thr.start()
+        Gates on state-block FLAG_MOVING | FLAG_CMD_MOVE. These are the bits
+        that clear empirically when a fixed-step jog (SET 0x04f5) finishes.
+
+        Note on the other candidates:
+          - State-block FLAG_BUSY (bit 13) is asserted in normal operation —
+            unsuitable for motion gating.
+          - Ping-word bits 2/21 (machine.is_busy) are what VPanel's
+            jog_wait_motion_complete @ 0x00417b00 polls, but only for the
+            absolute-move path (send_abs_move → SET 0x04f7). The fixed-step
+            jog path (dev_send_trigger_data → wait_move_bit_clear) waits on
+            ping bit 22 instead, and the firmware doesn't drive bits 2/21
+            during a jog — leaving is_busy stuck after every jog.
+
+        Two conditions, to avoid clearing before motion has started:
+          - at least 200 ms elapsed since send_jog (firmware needs a tick to
+            raise the bits);
+          - neither MOVING nor CMD_MOVE set on the cached state.
+        """
+        if not self._jog_armed:
+            return
+        if time.monotonic() - self._jog_sent_at < 0.2:
+            return
+        s = self._m.state
+        if s.flags & (FLAG_MOVING | FLAG_CMD_MOVE):
+            return
+        self._jog_armed = False
+        self._moving    = None
 
     def _toggle_spindle(self) -> None:
         s = self._m.state
@@ -395,7 +429,7 @@ class TUI:
         # Row: raw flags hex
         row += 1
         if row < height:
-            self._put(win, row, 2, f'flags  0x{s.flags:08X}', CP(_CP_LABEL))
+            self._put(win, row, 2, f'flags  0x{s.flags:08X}  ping  0x{self._m._last_ping_word:04X}', CP(_CP_LABEL))
 
         # Row: decoded flags
         row += 1
@@ -799,10 +833,7 @@ class TUI:
         mz = final_display[2] + oz
         ma = final_display[3] + oa
 
-        threading.Thread(
-            target=self._m.move_to_machine_pos, args=(mx, my, mz, ma),
-            daemon=True, name='coord-move',
-        ).start()
+        self._m.move_to_machine_pos(mx, my, mz, ma)
 
     def _draw_nc_panel(self, win: curses.window, start: int, height: int, cols: int) -> None:
         if not self._cut_job or height < 2:
