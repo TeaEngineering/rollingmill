@@ -35,11 +35,11 @@ All status/config queries use Pattern B. The polling step is mandatory — firin
 
 | wValue | Name | Response | Notes |
 |--------|------|----------|-------|
-| `0x0001` | `probe_device_ping` | 4 bytes LE uint32 | Status/motion bits — see [machine-state.md](machine-state.md) |
+| `0x0001` | `probe_device_ping` | 4 bytes LE uint32 | Status bits — see [machine-state.md](machine-state.md) |
 | `0x0002` | `detect_machine_type` | 4 bytes | High word `0x1234` → MDX-40A confirmed |
-| `0x0003` | `dev_read_response` | N bytes | Always used after a Pattern B trigger SET |
+| `0x0003` | `dev_read_response` | N bytes | Fetch asynchronous data response |
 | `0x0100` | `get_status_0x100` | 32 bytes BE | Machine state flags + XYZA position + spindle RPM — see [machine-state.md](machine-state.md) |
-| `0x0200` | `get_nc_bytes_processed` | 4 bytes BE uint32 | Bytes of NC data consumed by firmware; used for step-completion polling |
+| `0x0200` | `get_nc_bytes_processed` | 4 bytes BE uint32 | Bytes of NC data consumed by firmware; used for stepping through NC code — see [Sending NC/RML Code](sending-nc-code.md) |
 
 ---
 
@@ -49,7 +49,7 @@ All status/config queries use Pattern B. The polling step is mandatory — firin
 
 | wValue | Name | Response | Notes |
 |--------|------|----------|-------|
-| `0x03f5` | `poll_keepalive` | 1 byte | Must be sent every 200 ms; payload is 1 byte (value uninitialised in VPanel) |
+| `0x03f5` | `poll_keepalive` | 1 byte | Sent every 200 ms; payload is 1 byte (value uninitialised in VPanel) |
 | `0x0101` | `get_ascii_str_0x101` | ≤256 bytes | ASCII model/firmware string |
 
 ### Machine status
@@ -84,7 +84,7 @@ All status/config queries use Pattern B. The polling step is mandatory — firin
 | `0x030b` | `query_0x30b` | 16 bytes | WCS1 work origin offsets `[XYZA]` |
 | `0x3202` | `query_0x3202` | 16 bytes | WCS2 work origin offsets `[XYZA]` |
 | `0x3203`–`0x3208` | `query_axis_params_range` | 16 bytes each | WCS3–8 origins (4×uint32) |
-| `0x3209`–`0x3334` | `query_param_table_range` | 16 bytes each | WCS9–10 + parameter table (300 entries) |
+| `0x3209`–`0x3334` | `query_param_table_range` | 16 bytes each | WCS9–309 entries; see [Coordinate Systems](coordinate-systems.md) |
 | `0x030d` | `query_0x30d` | 16 bytes | Move waypoint lower bound |
 | `0x030e` | `query_0x30e` | 16 bytes | Move waypoint upper bound; `element[3]` (A axis) patched before motion planning |
 
@@ -95,7 +95,7 @@ All status/config queries use Pattern B. The polling step is mandatory — firin
 | `0x3106` | `query_0x3106_6bytes` | 6 bytes | `byte[1]` ∈ {1,2} checked for firmware mode |
 | `0x346b`–`0x3472` | `query_indexed_0x346a` (index 1–8) | 4 bytes each | Read tool diameter offsets (8 slots) |
 | `0x3701` | `get_uint32_0x3700` | 4 bytes | Single uint32 |
-| `0x3801` | `get_3uint32_0x3801` | 12 bytes | 3×uint32 |
+| `0x3801` | `get_rotary_axis_centreline_0x3801` | 12 bytes | 3×uint32 = stored rotary A-axis centreline `[X, Y, Z]` in 1/1000 mm. Only `Y, Z` define the line (X is "along" the rotation axis, so its value is informational only). Written by the jig-detect routine via `SET 0x3803`. Read by the "Current Jig" indicator in the main panel — see [vpanel-jig-detect.md](vpanel-jig-detect.md#current-jig-indicator). |
 | `0x3804` | `get_6uint32_0x3804` | 24 bytes | 6×uint32 — busy/status block; `word[0] bit 2 (0x4)` gates jog commands |
 | `0x3a02` | `get_2uint32_0x3a02` | 8 bytes | 2×uint32 |
 | `0x3a05` | `get_uint32_0x3a05` | 4 bytes | Used in spindle-stop to override Z for positioning |

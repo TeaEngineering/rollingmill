@@ -1,12 +1,31 @@
 # Reverse Engineering Notes
 
-Roland MDX-40A USB protocol — findings from Ghidra analysis of `VP_MDX40A.exe` and driver DLLs.
+The MDX-40A is installed as a Windows printer (Class=Printer), not a raw USB HID or WinUSB device. VPanel uses USB vendor control transfers (EP0) for machine state, jog, and configuration; NC/RML file data flows through the Windows printer stack to USB bulk-OUT.
 
-| Binary | `VP_MDX40A.exe` — PE32, x86, MFC, built 2012-11-07 |
-|--------|-----------------------------------------------------|
-| Tools  | Ghidra 12.0.4, pefile, PyGhidra 3.0.2              |
+The key components are:
 
----
+| File          | Role                                             |
+|---------------|--------------------------------------------------|
+| VP_MDX40A.exe | VPanel application                               |
+| RD25DGR64.DLL | Graphics DLL — the print driver proper           |
+| RD25DUI64.DLL | UI/config DLL — printer properties pages         |
+| rdlm64.dll    | Language Monitor                                 |
+| rd25dlf64.dll | Language Filter (chained with LM)                |
+| MDX40Ax64.RPD | Roland Printer Descriptor — machine capabilities |
+| MDX40AMAT.DAT | Material/tool data                               |
+
+
+Windows:
+
+    VPanel → WritePrinter("Roland MDX-40A") → Spooler → rdlm64.dll → USBPRINT.SYS → USB bulk-out
+
+RollingMill:
+
+    Our app → libusb bulk_write() → USB bulk-out
+
+We skip the entire printer stack.
+
+
 
 ## Protocol Reference
 
@@ -24,7 +43,7 @@ Roland MDX-40A USB protocol — findings from Ghidra analysis of `VP_MDX40A.exe`
 | [Coordinate Systems, Move To, and Origins](coordinate-systems.md) | WCS slots, display math, Move-To modes, Set Origin commands, VIEW position vs WCS origin |
 | [Jig Detection Algorithm](vpanel-jig-detect.md) | A-axis calibration rod routine — triple-contact probing, pin bisection, origin write |
 | [Tool Diameter Offsets](tool-diameter-offsets.md) | Storage and USB commands for 8-slot tool diameter offset table |
-| [Tool Sensor Calibration](tool-sensor-calibration.md) | Z-sensor location calibration routine (stub) |
+| [Tool Sensor Calibration](tool-sensor-calibration.md) | Refines the XY centre of the Z-height sensor pad |
 
 ---
 
@@ -36,8 +55,5 @@ data uses the bulk-OUT endpoint. There is no framing on the bulk channel — raw
 **Two transfer patterns:**
 - Pattern A — direct `GET wValue` (e.g. coordinates via `0x0100`)
 - Pattern B — `SET wValue` trigger then poll ping, then `GET 0x0003` for response data
-
-**Critical:** The firmware ignores bulk NC data unless wrapped in an operation bracket:
-`SET 0x1109 = 0x00` before data, `SET 0x1109 = 0xFF` after.
 
 **Byte order:** All multi-byte device values are big-endian.

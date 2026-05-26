@@ -3,7 +3,7 @@
 The MDX-40A stores 8 tool diameter offset slots in firmware. VPanel reads and writes them
 as part of the cut job setup flow (`execute_cut_job` → `apply_axis_config_to_device`).
 
-If a tool-diameter offset is not set by G10 in the NC code, in advance of activating Tool Diameter Offset (G41 left, or G42 right) then these stored value are used.
+If a tool-diameter offset is not set by G10 in the NC code, in advance of activating Tool Diameter Offset (G41 left, or G42 right) then these stored values are used.
 
 A similar system exists for Tool Length Offset (G43 enables, G49 cancels).
 

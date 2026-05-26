@@ -17,7 +17,7 @@ Offset  Type      Field
 24–31   (other status, partially decoded)
 ```
 
-Parse with `struct.unpack_from('>I4iI', data)`.
+Parse with `struct.unpack_from('>I4iI', data)`. All values in 1/1000 mm (or 1/1000° for A) and are absolute Machine Coordinates. See details to [translate to other coordinate systems](coordinate-systems.md).
 
 ### State flags (bytes 0–3, big-endian uint32)
 
@@ -55,22 +55,6 @@ bits 23, 17, 11, 4, 3, 2 (`0x00820E1C`)
 **Important:** MTR_PWR (bit 25) is NOT set during homing — motor power is NOT required for
 motion commands to execute. It reflects the front-panel button state only.
 
----
-
-## Coordinate Display
-
-VPanel's displayed coordinates subtract the active WCS origin from machine position:
-
-```python
-displayed_X = machine_X - origin_X
-displayed_Y = machine_Y - origin_Y
-displayed_Z = machine_Z - origin_Z
-displayed_A = (machine_A - origin_A) % 360_000   # mod 360.000°
-```
-
-All values in 1/1000 mm (A: 1/1000 degree). Origin is zero when MCS (slot 0) is active.
-
-RE: `FUN_00403810` (compute displayed coords) in VP_MDX40A.exe.
 
 ---
 
@@ -93,13 +77,15 @@ struct.unpack_from('<I', data)[0]
 | 12 | `0x00001000` | ACK_ABS | Transient acknowledgement for `SET 0x4f7` (absolute move) |
 | 21 | `0x00200000` | CMD_ACK | Clears after `SET 0x3901` / `SET 0x2425` / `SET 0x3107` / axis param writes |
 
+Bit 21 appears in both `BUSY_MASK` (combined with bit 2) and `CMD_ACK` (alone); the two names reflect different uses of the same physical bit.
+
 ### Steady-state values (live traces, 2026-05-12)
 
 | Condition | Ping value | Notes |
 |-----------|-----------|-------|
 | Normal idle | `0x00820800` | Bits 23, 17, 11 — hardware config constants |
-| After `SET 0x4f5` | `0x00822800` | Bit 13 briefly set, returns to idle |
-| After `SET 0x4f7` | `0x00821800` | Bit 12 briefly set, returns to idle |
+| After `SET 0x04f5` | `0x00822800` | Bit 13 briefly set, returns to idle |
+| After `SET 0x04f7` | `0x00821800` | Bit 12 briefly set, returns to idle |
 
 ---
 
@@ -128,16 +114,13 @@ while monotonic() < deadline:
     last_clear = now_clear
 ```
 
-**Do NOT send `SET 0x0004`** after motion — this causes USB STALL (`EPIPE`) on real hardware.
-The simulator code path in VP_MDX40A may use it; the real device does not accept it.
-
 ---
 
 ## NC Bytes-Processed Counter — GET 0x0200
 
 Pattern B trigger read: `SET 0x0200` → poll → `GET 0x0003`, 4 bytes big-endian uint32.
 
-RE: `get_coord_pair_0x200` @ `0x0041c290`.
+RE: `get_nc_bytes_processed_0x200` @ `0x0041c290`.
 
 The firmware increments this counter as it consumes NC data from its internal buffer.
 Used for step-completion detection in stepped/test-cut mode:
@@ -148,6 +131,8 @@ bulk_write(block)
 expected = (before + len(block)) & 0xFFFFFFFF
 poll until GET_0x0200() == expected   # 10-second timeout, 20 ms interval
 ```
+
+See [Sending NC code](sending-nc-code.md) for usage.
 
 ---
 

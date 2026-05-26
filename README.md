@@ -30,10 +30,13 @@ RollingMill implements both layers in pure Python.
 
 ZCL-40A 4th Axis
 ----
-When this unit is installed, the X-, Y-, and Z-axis travel path of the MDX-40A are reduced:
+When this unit is installed, the X-, Y-, and Z-axis travel of the MDX-40A is reduced:
 
-                       X     Y     Z
-    MDX-40A           305 x 305 x 105 (mm)
-    MDX-40A+ZCL-40A   271 x 305 x 68  (mm)
+| Axis | MDX-40A     | MDX-40A + ZCL-40A      |
+|------|-------------|------------------------|
+| X    | 0 → 305 mm  | 34 → 305 mm            |
+| Y    | 0 → 305 mm  | 0 → 305 mm             |
+| Z    | 0 → −105 mm | 0 → −68 mm             |
+| A    | —           | 0 → 360° (continuous)  |
 
 These limits are enforced in firmware, including from the physical jog controls on the machine itself.

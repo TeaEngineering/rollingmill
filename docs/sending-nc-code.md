@@ -96,6 +96,7 @@ Sits between the spooler and `USBPRINT.SYS`. Its port functions wrap the USB wri
 - `pfnStartDocPort` — sends the **Head blob** (hex-encoded bytes from registry key `Head`) to
   USB bulk-OUT before any file data.
 - `pfnWritePort` (`DoDIfferentKindsOfWrite` @ `0x180003B40`) — passes data to the
+  <!-- TODO: confirm symbol name in rdlm64.dll once loaded into Ghidra -->
   `rd25dlf64.dll` filter (if loaded), then to `USBPRINT pfnWrite` → USB bulk-OUT.
 - `pfnEndDocPort` — sends the **Tail blob** (registry key `Tail`) after all data.
 
@@ -109,8 +110,7 @@ Transparent to all normal bytes:
 - A `"PUF"` prefix triggers full passthrough with zero parsing.
 - **Adds no framing to the bulk channel.** RML-1/G-code bytes arrive at USB unmodified.
 
-The filter is completely transparent to firmware status. LogsRead and LogsWrite do exactly two things: pass bytes straight through, and intercept `\x03<Command>,...;` escape sequences. There is no USB status read, no ping, no error check anywhere in the filter. The only "error" behaviour is that dialog_canceled causes LogsRead to fast-forward read_pos = data_len (discards the rest of the current write buffer). The filter cannot detect firmware rejection of illegal
-  coordinates.
+The filter is completely transparent to firmware status. LogsRead and LogsWrite do exactly two things: pass bytes straight through, and intercept `\x03<Command>,...;` escape sequences. There is no USB status read, no ping, no error check anywhere in the filter. The only "error" behaviour is that dialog_canceled causes LogsRead to fast-forward read_pos = data_len (discards the rest of the current write buffer). The filter cannot detect firmware rejection of illegal coordinates.
 
 #### Tool change — ToolInfo escape sequence
 Tool-change interception is data-embedded, not a separate USB command. The NC file must contain:

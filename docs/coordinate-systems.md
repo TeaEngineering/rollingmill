@@ -12,7 +12,7 @@ The MDX-40A firmware maintains multiple **Work Coordinate System (WCS) slots**:
 
 - **WCS0** — machine coordinates (absolute, origin at home position)
 - **WCS1–8** — named user coordinate systems
-- **WCS9–309** — extended indexed coordinate systems (300 slots)
+- **WCS9–309** — extended indexed coordinate systems
 
 Origins persist in firmware non-volatile memory across USB disconnect and power
 cycle. VPanel keeps a RAM cache of the active WCS origin (`this+0x64..0x70`,
@@ -20,7 +20,8 @@ cycle. VPanel keeps a RAM cache of the active WCS origin (`this+0x64..0x70`,
 
 ### Display math
 
-`compute_display_coords @ 0x00403810`:
+VPanel's displayed coordinates subtract the active WCS origin from machine position:
+ `compute_display_coords @ 0x00403810`:
 
 ```
 displayed_X = machine_X - origin_X
@@ -29,7 +30,12 @@ displayed_Z = machine_Z - origin_Z
 displayed_A = (machine_A - origin_A) % 360000      // mod 360.000°
 ```
 
-All values in 1/1000 mm (or 1/1000° for A).
+All values in 1/1000 mm (or 1/1000° for A) and are absolute Machine Coordinates.
+
+Origin is zero when MCS (slot 0) is active.
+
+RE: `FUN_00403810` (compute displayed coords) in VP_MDX40A.exe.
+
 
 ### Reading origins back
 
@@ -74,21 +80,24 @@ No coordinate math in VPanel — firmware handles the entire motion.
 
 ### Mode 2 — Move to User Specified Location
 
-The user types target coordinates. VPanel forces the dialog into machine
-coordinates so the entered values are absolute:
+Handled by `on_cmd_move_to_user_position @ 0x00415e50`. The user types target
+coordinates into a dialog; VPanel does **no** direct absolute-move USB write.
+Instead it dispatches through `MDx3902_GiantDispatch` with mode `6`, and the
+firmware performs the move using its own internal logic:
 
 ```
-SET 0x3006, [0x00000000]                                // switch to machine CS for the dialog
-// [dialog 0x1edc, mode=1: user enters X, Y, Z as machine coords]
-SET 0x1109, [0x00]                                      // begin operation bracket
-SET 0x04f7, struct.pack('>HH4i', speed, 0xFFFF, x, y, z, a)   // absolute move
-SET 0x3f2,  []                                          // resume
-SET 0x1109, [0xFF]                                      // end operation bracket
+SET 0x1109, [0x00]                                            // begin operation bracket
+do_preferences_dialog(this)                                    // user enters target coords
+MDx3902_GiantDispatch(this->coordinat_sys_for_testcut, 6)      // SET 0x3902 dispatch, mode=6
+FUN_00414170(this)                                             // post-dispatch hook (TODO: trace)
+SET 0x3f2, []                                                  // resume
+SET 0x1109, [0xFF]                                             // end operation bracket
 ```
 
-- Coordinates are **machine coordinates**, not WCS-relative
-- Speed comes from `this+0xBC` (configured elsewhere)
-- The `0xFFFF` flags field selects absolute (not relative) positioning
+- Active WCS comes from `this->coordinat_sys_for_testcut` — Mode 2 honours the
+  currently-selected WCS, it does **not** force machine coordinates over USB.
+- The absolute-move `>HH4i` payload (speed, flags, X, Y, Z, A) is the
+  firmware's internal handling of `mode=6`, not what VPanel sends on the wire.
 
 ### Mode 3 — Move to Named/Stored Position
 
@@ -142,7 +151,7 @@ Two different per-WCS registers with overlapping but distinct purposes:
 |----------------|--------------------------------------------------|--------------------------------------------------|
 | Purpose        | User coordinate system zero point                | Named "go-here" target for Move To               |
 | Written by     | `SET 0x3f2` (capture) / `SET 0x030c..0x333B+`    | `SET 0x3803` (Detect Jig) / `SET 0x3805`         |
-| Read by        | `GET 0x030b/0x3202+` (Pattern B)                 | `GET 0x3806/0x3807`                              |
+| Read by        | `GET 0x030b/0x3202+` (Pattern B)                 | (not observed — VIEW is consumed internally by `SET 0x3902`/`0x3806`/`0x3807`) |
 | Used by        | Display (`displayed = machine - origin`)         | `SET 0x3902` Move To VIEW                        |
 | Per WCS?       | Yes                                              | Yes                                              |
 | Persistent?    | Yes (firmware non-volatile)                      | Yes (firmware non-volatile)                      |

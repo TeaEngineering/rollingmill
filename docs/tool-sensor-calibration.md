@@ -1,15 +1,12 @@
-VPanel - Tool Sensor Location Adjustment
-=======================
+# VPanel — Tool Sensor Location Adjustment
 
 Function: FUN_004182c0
 As shown at https://youtu.be/UKR7mRjQrUs?si=-HaAmA-wAzin0NZD&t=413
-It updates from x=290.2 y=266.5 updated to x=290.5 y=266.5
+Example run: (290.2, 266.5) → (290.5, 266.5)
 
 This is supposed to be done using the supplied detection pin in the 6mm spindle collet, but any flat ended rod would do.
 
-Let me trace the movement sequence carefully — the Z offsets and the paired ±X / ±Y moves are the key.
-
-  The function:
+The function:
   1. Guards on FUN_00430acf() and FUN_00417e20() (precondition checks)
   2. Saves current XY from param_1->field_0x68/0x6c, calls MdxAction_x3a03_p1 (sets work coordinate origin)
   3. Calls MdxAction_x3a00_p1(0xffffffff) (rapid jog enable)
@@ -46,7 +43,7 @@ Let me trace the movement sequence carefully — the Z offsets and the paired ±
   centre_X = iVar1 / 2
   centre_Y = (iVar2 + local_a0.nY) / 2
 
-  Then it moves the tool to the computed centre, stores it in param_1->field_0x60 (jig centre X) and param_1->field88_0x64 (jig centre Y), and calls MdxAction_x3a03_p1 again to set that as the new work coordinate origin.
+  Then it moves the tool to the computed centre, stores it in param_1->toolsensor_X and param_1->toolsensor_Y, and calls MdxAction_x3a03_p1 again to set that as the new work coordinate origin.
 
-  This is the automatic tool height sensor centre detection routine — it probes both sides of the traposoid sensor in X and Y (±18 mm = 36 mm jig diameter), averages the two touch points on each axis to find the true centre, and saves that to the machine. The send_waypoint_allowing_cancel calls are the actual probing moves where the machine will stall/touch the jig edge.
+  This is the automatic tool height sensor centre detection routine — it probes both sides of the trapezoidal sensor in X and Y (±18 mm = 36 mm jig diameter), averages the two touch points on each axis to find the true centre, and saves that to the machine. The send_waypoint_allowing_cancel calls are the actual probing moves where the machine will stall/touch the jig edge.
 
