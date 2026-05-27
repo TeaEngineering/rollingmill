@@ -49,7 +49,7 @@ All status/config queries use Pattern B. The polling step is mandatory — firin
 
 | wValue | Name | Response | Notes |
 |--------|------|----------|-------|
-| `0x03f5` | `poll_keepalive` | 1 byte | Sent every 200 ms; payload is 1 byte (value uninitialised in VPanel) |
+| `0x03f5` | `poll_keepalive_0x3f5` | 1 byte | Sent every 200 ms; payload is 1 byte (value uninitialised in VPanel) |
 | `0x0101` | `get_ascii_str_0x101` | ≤256 bytes | ASCII model/firmware string |
 
 ### Machine status
@@ -66,15 +66,15 @@ All status/config queries use Pattern B. The polling step is mandatory — firin
 
 | wValue | Name | Response | Notes |
 |--------|------|----------|-------|
-| `0x3003` | `get_uint32_0x3003` | 4 bytes | Current spindle/feed speed; clamped to `[0x3005.min, 0x3005.max]` |
-| `0x3005` | `get_uint32_pair_0x3005` | 8 bytes | Speed range `[min_speed, max_speed]`; stored at `obj[0x21]`/`obj[0x22]` |
 
 ### Spindle
 
 | wValue | Name | Response | Notes |
 |--------|------|----------|-------|
-| `0x2405` | `get_status_struct_0x2405` | 16 bytes | `uint32[0]` = total spindle rotation time in seconds |
+| `0x3003` | `get_uint32_0x3003` | 4 bytes | Current spindle/feed speed; clamped to `[0x3005.min, 0x3005.max]` |
+| `0x3005` | `get_speed_range_0x3005` | 8 bytes | Spindle speed range `[min_speed, max_speed]`; stored at `obj[0x21]`/`obj[0x22]` |
 | `0x3900` | `get_uint32_0x3900` | 4 bytes BE | Configured spindle target RPM; range 4500–15000 |
+| `0x2405` | `get_status_struct_0x2405` | 16 bytes | `uint32[0]` = total spindle rotation time in seconds |
 
 ### Coordinate systems / WCS
 
@@ -96,10 +96,10 @@ All status/config queries use Pattern B. The polling step is mandatory — firin
 | `0x346b`–`0x3472` | `query_indexed_0x346a` (index 1–8) | 4 bytes each | Read tool diameter offsets (8 slots) |
 | `0x3701` | `get_uint32_0x3700` | 4 bytes | Single uint32 |
 | `0x3801` | `get_rotary_axis_centreline_0x3801` | 12 bytes | 3×uint32 = stored rotary A-axis centreline `[X, Y, Z]` in 1/1000 mm. Only `Y, Z` define the line (X is "along" the rotation axis, so its value is informational only). Written by the jig-detect routine via `SET 0x3803`. Read by the "Current Jig" indicator in the main panel — see [rotary-jig-alignment.md](rotary-jig-alignment.md#current-jig-indicator). |
-| `0x3804` | `get_6uint32_0x3804` | 24 bytes | 6×uint32 — busy/status block; `word[0] bit 2 (0x4)` gates jog commands |
+| `0x3804` | `get_6uint32_0x3804` | 24 bytes | 6×uint32 — unknown values used by `FUN_004017d0` |
 | `0x3a02` | `get_2uint32_0x3a02` | 8 bytes | 2×uint32 |
 | `0x3a05` | `get_uint32_0x3a05` | 4 bytes | Used in spindle-stop to override Z for positioning |
-| `0x05f0` | `get_axis_angles_0x5f0` | 32 bytes | 8×uint32 = 4 `(value, scale)` pairs → rotation angles XYZA |
+| `0x05f0` | `get_unknown_axis_values_0x5f0` | 32 bytes | 8×uint32 = 4 `(value, scale)` pairs → unknown XYZA |
 
 ---
 
@@ -115,6 +115,7 @@ Payloads are given in Python `struct.pack` notation.
 | `0x04f5` | `>HH4i` — speed, `0x0000`, dx, dy, dz, da | **Relative jog.** Deltas in 1/1000 mm (A: 1/1000°). Interactive jogging. |
 | `0x04f6` | `>HH4i` — `0xFFFF`, `0x0000`, dx, dy, dz, da | **Relative waypoint.** Max-speed step; used in multi-step milling sequences. |
 | `0x04f7` | `>HH4i` — speed, `0xFFFF`, absX, absY, absZ, absA | **Absolute move.** Absolute machine coords in 1/1000 mm. |
+| `0x03f3` | (bare) | **Motion stop** (`send_motion_stop`) — immediately halts any in-flight motion. |
 | `0x1109` | 1 byte: `0x00` = begin, `0xFF` = end | **Operation bracket.** Must wrap all jog, move-to, and NC job sequences. |
 
 All three jog/move commands share the same 20-byte `'>HH4i'` payload layout:
@@ -132,14 +133,13 @@ bytes 16–19  int32   A      (1/1000 degree, signed)
 
 | wValue | Payload | Notes |
 |--------|---------|-------|
-| `0x03f0` | (bare) | Spindle ON |
-| `0x03f1` | (bare) | Spindle OFF |
 | `0x3006` | `>I` — RPM uint32 | Set spindle speed (0 = off). |
 | `0x3008` | 1 byte (10–200) | Spindle speed override % |
 | `0x3009` | (bare) | Spindle stop; followed by `wait_busy_bits_clear` in drilling sequences |
 | `0x3808` | `<HH` — RPM uint16, mode=2 | NC S-word spindle speed; sent during NC job only |
 | `0x3809` | `<HH` — [1, 0xFFFF] start / [0, 0] stop | Rotary A-axis drilling mode (continuous slow rotation) |
 | `0x3901` | `>I` — RPM uint32 | Write spindle target RPM (4500–15000); poll ping bit 21 clear after |
+| `0x2425` | (bare) | Reset spindle rotation time counter to zero; poll ping bit 21 clear after |
 
 ### Feed rate
 
@@ -151,8 +151,6 @@ bytes 16–19  int32   A      (1/1000 degree, signed)
 
 | wValue | Payload | Notes |
 |--------|---------|-------|
-| `0x03f2` | (bare) | Latch current position as WCS origin (also "resume") |
-| `0x03f3` | (bare) | Unknown? |
 | `0x030c` | `>4i` — X, Y, Z, A (1/1000 mm) | Write WCS1 origin |
 | `0x3335`–`0x333d` | `>4i` — X, Y, Z, A | Write WCS2–10 origins |
 
@@ -165,13 +163,22 @@ bytes 16–19  int32   A      (1/1000 degree, signed)
 | `0x2012` | 2×uint32 (8 bytes) | Write motion limits pair; poll ping bit 21 clear after |
 | `0x3468` | 1 byte (bool) | Toggle "Optional Block Skip" on/off |
 
-### Housekeeping
+### NC-Code Housekeeping
 
 | wValue | Payload | Notes |
 |--------|---------|-------|
-| `0x03f5` | 1 byte | Keepalive / poll trigger; send every 200 ms |
-| `0x2425` | (bare) | Reset spindle rotation time counter to zero; poll ping bit 21 clear after |
 | `0x0200` | (trigger) | Prime NC bytes-processed counter read (Pattern B) |
+
+
+### Uncertain/Unknown
+
+| wValue | Payload | Notes |
+|--------|---------|-------|
+| `0x03f2` | (bare) | Often unwinder brackets with 3f5, e.g. `FUN_00416150`  |
+| `0x03f5` | 1 byte | Keepalive / poll trigger; send every 200 ms |
+| `0x03f0` | (bare) | NC code execution - Pause (uncertain - `on_cmd_set_origin_point`) |
+| `0x03f1` | (bare) | NC code execution - Resume (uncertain - `on_cmd_setup_dialog_commit`) |
+
 
 ---
 

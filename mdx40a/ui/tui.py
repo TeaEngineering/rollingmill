@@ -351,7 +351,13 @@ class TUI:
         t = _trace.get_active()
         if t:
             t.annotate(f"KEY <>  spindle_target_rpm={new_rpm}")
-        self._m.spindle_on_rpm(new_rpm)
+        # While the spindle is off, only adjust the cached target — `s` will
+        # push it to the device when the user actually starts the spindle.
+        # While running, push live so the new RPM takes effect immediately.
+        if self._m.state.flags & FLAG_SPINDLE:
+            self._m.spindle_on_rpm(new_rpm)
+        else:
+            self._m.set_target_rpm(new_rpm)
 
     def _adjust_overrides(self, delta: int) -> None:
         """Adjust spindle speed % and cutting feed % together (+/- keys)."""
@@ -459,7 +465,7 @@ class TUI:
             self._put(win, row, 2, f'state  {state_str:<12} ', CP(_CP_LABEL))
 
         # Row: spindle speed + on/off
-        # Layout: spindle  OFF  tgt  9000  ×100% =  9000 RPM  feed 100%  runtime Xh XXm
+        # Layout: spindle  OFF  live 9000  tgt  9000  ×100% =  9000 RPM  feed 100%  runtime Xh XXm
         #         RE: actual_rpm = MulDiv(target_rpm, pct, 100) @ update_state_and_coords
         #         <> keys set target RPM (SET 0x3901); +- keys set both override %s together
         row += 1
@@ -469,20 +475,23 @@ class TUI:
             feed_pct    = self._m.cutting_feed_pct
             tgt_rpm     = self._m.spindle_target_rpm
             actual_rpm  = tgt_rpm * spd_pct // 100
+            live        = self._m.spindle_live_speed
+            live_str    = f'{live:5d}' if live is not None else '    ?'
             state_str   = 'ON ' if spindle_on else 'off'
             state_attr  = (CP(_CP_STATUS) | BOLD) if spindle_on else CP(_CP_LABEL)
             self._put(win, row,  2, 'spindle', CP(_CP_LABEL))
             self._put(win, row, 10, state_str, state_attr)
-            self._put(win, row, 14, f'tgt {tgt_rpm:5d}', CP(_CP_VALUE))
-            self._put(win, row, 24, f'×{spd_pct:3d}% = {actual_rpm:5d} RPM',
+            self._put(win, row, 14, f'live {live_str}', CP(_CP_VALUE))
+            self._put(win, row, 25, f'tgt {tgt_rpm:5d}', CP(_CP_VALUE))
+            self._put(win, row, 35, f'×{spd_pct:3d}% = {actual_rpm:5d} RPM',
                       CP(_CP_VALUE) | BOLD)
-            self._put(win, row, 43, f'feed {feed_pct:3d}%', CP(_CP_LABEL))
+            self._put(win, row, 54, f'feed {feed_pct:3d}%', CP(_CP_LABEL))
             if self._drill_active:
-                self._put(win, row, 55, 'DRILL', CP(_CP_LOG_WARN) | BOLD)
+                self._put(win, row, 66, 'DRILL', CP(_CP_LOG_WARN) | BOLD)
             secs = self._m.spindle_secs
             if secs is not None:
                 h, m = secs // 3600, (secs % 3600) // 60
-                self._put(win, row, 62, f'runtime {h}h {m:02d}m', CP(_CP_LABEL))
+                self._put(win, row, 73, f'runtime {h}h {m:02d}m', CP(_CP_LABEL))
 
         # Row: rotary axis centreline origin (only shown when rotary is installed)
         rotary_byte = self._m.rotary_extension_byte

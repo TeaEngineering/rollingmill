@@ -156,6 +156,8 @@ class MDX40A:
         self._spindle_tick: int = 0          # increments per poll(); refreshes spindle time every _SPINDLE_POLL_EVERY ticks
         self._spindle_speed_pct: int = 100   # cached spindle override %
         self._cutting_feed_pct: int = 100    # cached cutting feed override %
+        self._spindle_range: Optional[tuple] = None          # (speed_min, speed_max) uint32 pair from GET 0x3005
+        self._spindle_live_speed: Optional[int] = None       # latest GET 0x3003 uint32 — current spindle/feed speed
         self._spindle_target_rpm: int = SPINDLE_RPM_MIN  # configured target RPM (GET/SET 0x3900/0x3901)
         self._spindle_secs: Optional[int] = None
         self._active_wcs: int   = 0                      # 0=MCS, 1-10=WCS1-WCS10
@@ -343,6 +345,24 @@ class MDX40A:
     def spindle_target_rpm(self) -> int:
         return self._spindle_target_rpm
 
+    @property
+    def spindle_range(self) -> Optional[tuple]:
+        """Spindle speed range (speed_min, speed_max) from GET 0x3005.
+
+        Two big-endian uint32s refreshed on every poll. None before the first
+        poll completes. The current spindle/feed speed (GET 0x3003) is clamped
+        by the firmware to this range.
+        """
+        return self._spindle_range
+
+    @property
+    def spindle_live_speed(self) -> Optional[int]:
+        """Current spindle/feed speed from GET 0x3003 (uint32, refreshed every poll).
+
+        Clamped by the firmware to `spindle_range`. None before the first poll.
+        """
+        return self._spindle_live_speed
+
     def get_spindle_rpm(self) -> Optional[int]:
         """Read configured spindle target RPM from device (Pattern B, GET 0x3900).
 
@@ -360,6 +380,19 @@ class MDX40A:
         except usb.core.USBError as e:
             log.warning("get_spindle_rpm failed: %s", e)
             return None
+
+    def set_target_rpm(self, rpm: int) -> int:
+        """Update the cached spindle target RPM only — does not touch the device.
+
+        Use while the spindle is off so adjustments to the target accumulate in
+        software; the value is pushed to the firmware later by `spindle_on_rpm`
+        (typically called from the spindle-toggle handler when the user starts
+        the spindle). Returns the clamped RPM that was stored.
+        """
+        rpm = max(SPINDLE_RPM_MIN, min(SPINDLE_RPM_MAX, int(rpm)))
+        self._spindle_target_rpm = rpm
+        log.debug("Spindle target RPM cached at %d (not pushed)", rpm)
+        return rpm
 
     def spindle_on_rpm(self, rpm: int) -> None:
         """Set spindle target RPM (SET 0x3901, 1 × big-endian uint32).
@@ -461,9 +494,8 @@ class MDX40A:
         return self._spindle_secs
 
     def get_device_status_0x3804(self) -> Optional[tuple]:
-        """Read the 6-uint32 device status block (RE: get_6uint32_0x3804 @ 0x0041ad10).
+        """Read the 6-uint32 unknown values (RE: get_6uint32_0x3804 @ 0x0041ad10).
 
-        Pattern B trigger read: SET 0x3804 → poll ping[3] → GET 0x0003, 24 bytes BE.
         VPanel stores the result at this+0x8c..0xa0 and uses it in two ways:
           - FUN_00403e90: word[0] bit 2 (0x4) gates jog commands (suppresses if set)
           - FUN_004042e0: same bit is the motion-complete wait exit condition
@@ -819,7 +851,14 @@ class MDX40A:
                     if raw is not None and len(raw):
                         if wv == 0x3800:
                             self._rotary_extension_byte = raw[0]
-                        log.debug(f"GET 0x{wv:0x} returned: {raw}")
+                        elif wv == 0x3005 and len(raw) >= 8:
+                            self._spindle_range = struct.unpack_from('>2I', bytes(raw))
+                            log.debug(f"GET 0x{wv:0x} spindle range {self._spindle_range}")
+                        elif wv == 0x3003 and len(raw) >= 4:
+                            self._spindle_live_speed = struct.unpack_from('>I', bytes(raw))[0]
+                            log.debug(f"GET 0x{wv:0x} spindle live speed {self._spindle_live_speed}")
+                        else:
+                            log.debug(f"GET 0x{wv:0x} returned: {raw}")
                 except usb.core.USBError as e:
                     log.debug("Poll read 0x%04x failed: %s", wv, e)
 
