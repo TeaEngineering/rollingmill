@@ -153,7 +153,7 @@ class MDX40A:
         self._intf_num: Optional[int] = None
         self._state = MachineState()
         self._last_ping_word: Optional[int] = None   # most recent GET 0x0001 (uint32 LE); see is_busy
-        self._spindle_tick: int = 0          # increments per poll(); refreshes spindle time every _SPINDLE_POLL_EVERY ticks
+        self._spindle_last_read_at: float = 0.0
         self._spindle_speed_pct: int = 100   # cached spindle override %
         self._cutting_feed_pct: int = 100    # cached cutting feed override %
         self._spindle_range: Optional[tuple] = None          # (speed_min, speed_max) uint32 pair from GET 0x3005
@@ -218,9 +218,9 @@ class MDX40A:
         """
         s = self._read_state()
         self._ping_status()
-        self._spindle_tick += 1
-        if self._spindle_tick >= self._SPINDLE_POLL_EVERY:
-            self._spindle_tick = 0
+        now = time.monotonic()
+        if now - self._spindle_last_read_at >= self._SPINDLE_POLL_INTERVAL:
+            self._spindle_last_read_at = now
             secs = self.get_spindle_time()
             if secs is not None:
                 self._spindle_secs = secs
@@ -430,9 +430,7 @@ class MDX40A:
         payload = struct.pack('<HH', 1, 0xFFFF) if enabled else struct.pack('<HH', 0, 0)
         try:
             _usb.vend_set(self._dev, 0x3809, payload)
-            log.info("Rotary drilling mode %s (SET 0x3809 %s)",
-                     "ON" if enabled else "OFF",
-                     "[1, 0xFFFF]" if enabled else "[0, 0]")
+            log.info("Rotary drilling %s", "ON" if enabled else "OFF")
         except usb.core.USBError as e:
             log.warning("rotary_drill_mode failed: %s", e)
 
@@ -771,7 +769,7 @@ class MDX40A:
 
     # ── Internal ─────────────────────────────────────────────────────────────
 
-    _SPINDLE_POLL_EVERY = round(60.0 / POLL_INTERVAL)  # poll() calls between spindle-time reads
+    _SPINDLE_POLL_INTERVAL = 60.0  # seconds between get_spindle_time() refreshes (wall-clock, not call count)
 
     def _handshake(self) -> None:
         """Perform the VPanel startup sequence."""
