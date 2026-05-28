@@ -118,6 +118,15 @@ class MachineState:
         """True when the state block has been populated from the device."""
         return bool(self.raw)
 
+    @property
+    def idle(self) -> bool:
+        """True when the firmware has finished init/homing and is at idle (STATE == 2).
+
+        Safe gate for follow-up queries (spindle time, rotary centreline, etc.)
+        that rely on firmware state only populated once the machine reaches idle.
+        """
+        return self.ready and (self.flags & FLAG_STATE) >> FLAG_STATE_SHIFT == 2
+
 
 def _decode_state(data: bytes) -> MachineState:
     data = bytes(data)
@@ -218,15 +227,15 @@ class MDX40A:
         """
         s = self._read_state()
         self._ping_status()
+        machine_idle = s is not None and s.idle
         now = time.monotonic()
-        if now - self._spindle_last_read_at >= self._SPINDLE_POLL_INTERVAL:
+        if machine_idle and now - self._spindle_last_read_at >= self._SPINDLE_POLL_INTERVAL:
             self._spindle_last_read_at = now
             secs = self.get_spindle_time()
             if secs is not None:
                 self._spindle_secs = secs
         # Read rotary centreline lazily on first idle state — calibration value, static at runtime.
-        if (self._rotary_centerline is None and s is not None and s.ready
-                and (s.flags & FLAG_STATE) >> FLAG_STATE_SHIFT == 2):
+        if self._rotary_centerline is None and machine_idle:
             self._rotary_centerline = self.get_rotary_axis_centreline()
         return s
 
