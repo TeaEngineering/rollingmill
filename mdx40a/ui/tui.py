@@ -11,7 +11,7 @@ Keybindings:
   a / z      Z axis  +/−  (a raises, z lowers)
   [/]        A axis  −/+
   Esc        cancel in-flight jog
-  f          toggle fast / slow jog speed
+  f          cycle jog speed: vslow / slow / medium / fast (default slow)
   1/2/3/4/5  XYZ step: 0.01/0.1/1.0/10.0/50.0 mm  A step: 0.01/0.1/1.0/10.0/90.0°
   s          spindle on / off (toggle)
   d          A-axis rotary drilling on / off (toggle; Drill Workpiece dialog)
@@ -41,7 +41,7 @@ from .. import machine as _machine
 from .. import trace as _trace
 from ..machine import (FLAG_DOOR, FLAG_SPINDLE, FLAG_CMD_MOVE, FLAG_TOOLBTN,
                        FLAG_MOVING, FLAG_BUSY, FLAG_ERROR,
-                       FLAG_STATE, FLAG_STATE_SHIFT, STATE_MAP)
+                       FLAG_STATE, FLAG_STATE_SHIFT, JOG_SPEED_MAX, STATE_MAP)
 from ..cutjob import CutJob
 from . import log as _log
 
@@ -49,6 +49,15 @@ from . import log as _log
 
 STEPS_LINEAR = [0.01, 0.1, 1.0, 10.0, 50.0]   # XYZ jog distances (mm)
 STEPS_ROTARY = [0.01, 0.1, 1.0, 10.0, 90.0]   # A jog distances (degrees)
+
+# Jog speed presets cycled by the `f` key (mm/min).
+# slow = VPanel continuous-jog ramp start (240); fast = firmware max (0xFFFF).
+SPEED_PRESETS = [
+    ('vslow',  120),
+    ('slow',   240),
+    ('medium', 480),
+    ('fast',   JOG_SPEED_MAX),
+]
 
 # ── Colour pair IDs ───────────────────────────────────────────────────────────
 
@@ -99,7 +108,7 @@ class TUI:
         self._m            = machine
         self._log          = log_buf
         self._step_i       = 2           # index into STEPS_LINEAR / STEPS_ROTARY (default 1.0mm / 1.0°)
-        self._fast         = False
+        self._speed_i      = 1           # index into SPEED_PRESETS; `f` cycles (default slow)
         self._moving       : Optional[str] = None   # axis currently jogging (None → idle)
         self._jog_armed    = False                   # True between send_jog() and post-motion settle
         self._jog_sent_at  = 0.0                     # monotonic timestamp of last send_jog()
@@ -252,10 +261,10 @@ class TUI:
             return
 
         if key in (ord('f'), ord('F')):
-            self._fast = not self._fast
+            self._speed_i = (self._speed_i + 1) % len(SPEED_PRESETS)
             t = _trace.get_active()
             if t:
-                t.annotate(f"KEY f  speed={'FAST' if self._fast else 'slow'}")
+                t.annotate(f"KEY f  speed={SPEED_PRESETS[self._speed_i][0]}")
         elif key in (ord('1'), ord('2'), ord('3'), ord('4'), ord('5')):
             self._step_i = key - ord('1')
             lin = STEPS_LINEAR[self._step_i]
@@ -287,7 +296,7 @@ class TUI:
             return  # previous jog still settling — ignore (no overlap)
         step  = STEPS_ROTARY[self._step_i] if axis == 'A' else STEPS_LINEAR[self._step_i]
         dist  = sign * step
-        speed = _machine.JOG_SPEED_FAST if self._fast else _machine.JOG_SPEED_SLOW
+        speed = SPEED_PRESETS[self._speed_i][1]
 
         t = _trace.get_active()
         if t:
@@ -414,7 +423,7 @@ class TUI:
         BOLD  = curses.A_BOLD
 
         # Row 0 — title bar
-        speed_lbl = "FAST" if self._fast else "slow"
+        speed_lbl = SPEED_PRESETS[self._speed_i][0]
         lin_lbl   = STEPS_LINEAR[self._step_i]
         rot_lbl   = STEPS_ROTARY[self._step_i]
         wcs_lbl   = 'MCS' if self._m.active_wcs == 0 else f'WCS{self._m.active_wcs}'
@@ -510,8 +519,8 @@ class TUI:
         ref_row = height - 2
         if ref_row > row + 1:
             key_lines = [
-                '  ←→ X   ↑↓ Y   a/z Z   [] A',
-                '  f fast/slow   1-5 step   s spindle   d A-drill   <> RPM   -/+ override%   c coords   m move-to   t tools   q quit',
+                '  jog: ←→ X   ↑↓ Y   a/z Z   [] A    f speed (vslow/slow/medium/fast)   1-5 step',
+                '  s spindle   <> RPM   d A-drill   -/+ override%   c coords   m move-to   t tools   q quit',
             ]
             for i, line in enumerate(key_lines):
                 r = ref_row + i

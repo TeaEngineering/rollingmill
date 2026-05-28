@@ -22,11 +22,9 @@ log = logging.getLogger(__name__)
 
 POLL_INTERVAL = 0.200   # seconds — recommended cadence for caller of MDX40A.poll()
 
-# Jog speeds (mm/min). VPanel sends 0xFFFF (max) for single-press steps;
-# for a meaningful slow/fast difference we use VPanel's continuous-ramp bounds.
+# Firmware-max jog speed (mm/min). VPanel sends 0xFFFF for single-press steps.
 # RE: DAT_00440aa0=240 (ramp start), DAT_00440aac=8000 (XYZ ramp max).
-JOG_SPEED_SLOW =   240   # VPanel continuous jog ramp start (XYZ)
-JOG_SPEED_FAST = 0xFFFF  # VPanel single-press speed (firmware maximum)
+JOG_SPEED_MAX = 0xFFFF  # firmware maximum
 
 # Spindle RPM limits (MDX-40A hardware range: 4500–15000 RPM)
 # RE: FUN_00402910 constructor sets param_1[0x30]=15000; min confirmed from
@@ -245,7 +243,7 @@ class MDX40A:
         self,
         axis: str,
         dist_mm: float,
-        speed: int = JOG_SPEED_SLOW,
+        speed: int = 240,
     ) -> None:
         """Send a relative-displacement jog and return immediately.
 
