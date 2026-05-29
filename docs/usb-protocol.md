@@ -36,7 +36,7 @@ All status/config queries use Pattern B. The polling step is mandatory — firin
 | wValue | Name | Response | Notes |
 |--------|------|----------|-------|
 | `0x0001` | `probe_device_ping` | 4 bytes LE uint32 | Status bits — see [machine-state.md](machine-state.md) |
-| `0x0002` | `detect_machine_type` | 4 bytes | High word `0x1234` → MDX-40A confirmed |
+| `0x0002` | `detect_machine_endian` | 4 bytes | High word `0x1234` → native LE, else BE enable byteswap |
 | `0x0003` | `dev_read_response` | N bytes | Fetch asynchronous data response |
 | `0x0100` | `get_status_0x100` | 32 bytes BE | Machine state flags + XYZA position + spindle RPM — see [machine-state.md](machine-state.md) |
 | `0x0200` | `get_nc_bytes_processed` | 4 bytes BE uint32 | Bytes of NC data consumed by firmware; used for stepping through NC code — see [Sending NC/RML Code](sending-nc-code.md) |

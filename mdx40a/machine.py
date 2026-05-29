@@ -171,6 +171,7 @@ class MDX40A:
         self._wcs_offset: tuple = (0.0, 0.0, 0.0, 0.0)  # machine coords of active WCS origin (mm/deg)
         self._rotary_extension_byte: Optional[int] = None    # latest GET 0x3800 byte (0=none, 1=rotary, 2=rotary+vice)
         self._rotary_centerline: Optional[tuple] = None      # stored A-axis centreline (x_mm, y_mm, z_mm); read once at idle
+        self._firmware_id: Optional[str] = None              # ASCII model/firmware string from GET 0x0101 (read at handshake)
 
     # ── Connection lifecycle ──────────────────────────────────────────────────
 
@@ -730,6 +731,38 @@ class MDX40A:
         """
         return self._rotary_centerline
 
+    @property
+    def firmware_id(self) -> Optional[str]:
+        """ASCII model/firmware identification string read at startup (GET 0x0101).
+
+        None if the handshake hasn't completed or the device didn't respond.
+        """
+        return self._firmware_id
+
+    def get_firmware_id(self) -> Optional[str]:
+        """Query the machine for its ASCII model/firmware string (Pattern B, GET 0x0101).
+
+        RE: AutoMachineClass::get_ascii_str_trigger_0x101 @ 0x41c190 — bare SET 0x0101
+        trigger then dev_read_response (ping-poll + GET 0x0003), max 256 bytes,
+        result stored as a null-terminated ASCII CString.
+        """
+        try:
+            data = _usb.trigger_read_b(self._dev, 0x0101, 256)
+            if data is None or not len(data):
+                log.warning("get_firmware_id: no response")
+                return None
+            # Truncate at first NUL (CString semantics) and decode as ASCII.
+            raw = bytes(data)
+            nul = raw.find(b'\x00')
+            if nul >= 0:
+                raw = raw[:nul]
+            text = raw.decode('ascii', errors='replace').strip()
+            log.debug("Firmware ID: %r", text)
+            return text
+        except (usb.core.USBError, ValueError) as e:
+            log.warning("get_firmware_id failed: %s", e)
+            return None
+
     def get_rotary_axis_centreline(self) -> Optional[tuple]:
         """Read stored rotary A-axis centreline from firmware (Pattern B, GET 0x3801).
 
@@ -823,6 +856,13 @@ class MDX40A:
             log.debug("Keepalive sent")
         except usb.core.USBError as e:
             log.warning("Keepalive failed: %s", e)
+
+        # Read ASCII model/firmware identification string (GET 0x0101).
+        # RE: AutoMachineClass::get_ascii_str_trigger_0x101 @ 0x41c190.
+        fw = self.get_firmware_id()
+        if fw:
+            self._firmware_id = fw
+            log.info("Firmware ID: %s", fw)
 
         # Read initial 0x3804 device status (6×uint32 busy/status block)
         self.get_device_status_0x3804()
