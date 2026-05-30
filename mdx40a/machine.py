@@ -619,30 +619,6 @@ class MDX40A:
         except usb.core.USBError as e:
             log.warning("set_active_wcs(%d) failed: %s", slot, e)
 
-    def capture_origin(self, slot: Optional[int] = None) -> bool:
-        """Latch current machine position as the WCS origin (SET 0x3f2).
-
-        If `slot` differs from the active WCS, activates it first.
-        RE: on_cmd_set_origin_point @ 0x00416AB0 — bare trigger SET 0x3f2; firmware
-        captures its encoder positions into the currently active WCS slot.
-        """
-        target = slot if slot is not None else self._active_wcs
-        if target == 0:
-            log.warning("capture_origin: cannot capture into MCS (slot 0)")
-            return False
-        try:
-            if target != self._active_wcs:
-                self._active_wcs = target
-            _usb.vend_set(self._dev, 0x3f2)
-            log.info("Origin captured into WCS%d", target)
-            origin = self.get_wcs_origin(target)
-            if origin:
-                self._wcs_offset = origin
-            return True
-        except usb.core.USBError as e:
-            log.warning("capture_origin failed: %s", e)
-            return False
-
     def write_wcs_origin(
         self, slot: int,
         x_mm: float, y_mm: float, z_mm: float, a_deg: float,
@@ -668,6 +644,38 @@ class MDX40A:
                 self._wcs_offset = (x_mm, y_mm, z_mm, a_deg)
         except usb.core.USBError as e:
             log.warning("write_wcs_origin(%d) failed: %s", slot, e)
+
+    def partial_update_wcs_origin(self, slot: int, axis: str) -> bool:
+        """Overwrite one axis of a stored WCS origin with the live machine position.
+
+        RE: partial_update_coord_sys @ 0x00403a40 — re-reads the slot's stored
+        origin, patches the chosen axis from the caller-supplied destination,
+        then writes the result back via send_origin_to_coord. The target slot
+        does not need to be the active WCS.
+        """
+        if not 1 <= slot <= 10:
+            raise ValueError(f"WCS slot must be 1–10, got {slot}")
+        if axis not in ('X', 'Y', 'Z', 'A'):
+            raise ValueError(f"axis must be X/Y/Z/A, got {axis!r}")
+
+        origin = self.get_wcs_origin(slot)
+        if origin is None:
+            log.warning("partial_update_wcs_origin(%d, %s): re-read failed", slot, axis)
+            return False
+
+        x, y, z, a = origin
+        s = self._state
+        if axis == 'X':
+            x = s.x_mm
+        elif axis == 'Y':
+            y = s.y_mm
+        elif axis == 'Z':
+            z = s.z_mm
+        else:
+            a = s.a_deg
+
+        self.write_wcs_origin(slot, x, y, z, a)
+        return True
 
     # ── Tool diameter offsets ─────────────────────────────────────────────────
 

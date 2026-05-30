@@ -111,17 +111,6 @@ SET 0x3807    // move to alternate stored position
 
 ---
 
-## Set Origin Point
-
-The dialog asks which axes to set (XYZ or XY) then sends a single bare trigger:
-
-```
-SET 0x3f2, []    // capture current position as the active WCS origin
-```
-
-The firmware reads its own encoders and latches the result into the active
-WCS slot. VPanel sends no coordinates.
-
 ### Explicit origin write
 
 Used internally (e.g. after Detect Jig, axis-config sequences) — write a
@@ -150,7 +139,7 @@ Two different per-WCS registers with overlapping but distinct purposes:
 |                | WCS Origin                                       | VIEW Position                                    |
 |----------------|--------------------------------------------------|--------------------------------------------------|
 | Purpose        | User coordinate system zero point                | Named "go-here" target for Move To               |
-| Written by     | `SET 0x3f2` (capture) / `SET 0x030c..0x333B+`    | `SET 0x3803` (Detect Jig) / `SET 0x3805`         |
+| Written by     | `SET 0x030c..0x333B+`                            | `SET 0x3803` (Detect Jig) / `SET 0x3805`         |
 | Read by        | `GET 0x030b/0x3202+` (Pattern B)                 | (not observed — VIEW is consumed internally by `SET 0x3902`/`0x3806`/`0x3807`) |
 | Used by        | Display (`displayed = machine - origin`)         | `SET 0x3902` Move To VIEW                        |
 | Per WCS?       | Yes                                              | Yes                                              |
@@ -166,7 +155,6 @@ Two different per-WCS registers with overlapping but distinct purposes:
 | Move → VIEW position          | `SET 0x3902`                                  | Firmware VIEW reg          | No           |
 | Move → User specify           | `SET 0x04f7` (absolute)                       | Machine motion             | Display only |
 | Move → Named position         | `SET 0x3806` / `0x3807`                       | Firmware named regs        | No           |
-| Set Origin (capture)          | `SET 0x3f2` (bare trigger)                    | Firmware WCS slot          | No           |
 | Set Origin (explicit write)   | `SET 0x030c` / `0x3335..0x333B+` + 4×uint32   | Firmware WCS slot          | Caller       |
 | Detect Jig result             | `SET 0x3803` + 6×uint32                       | Firmware VIEW reg          | Yes (probing)|
 | Read origin back              | `GET 0x030b` etc. (Pattern B)                 | VPanel RAM cache           | Display only |

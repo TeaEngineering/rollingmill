@@ -587,7 +587,7 @@ class TUI:
             self._wcs_sel = max(0, self._wcs_sel - 1)
         elif key == curses.KEY_DOWN:
             self._wcs_sel = min(10, self._wcs_sel + 1)
-        elif key in (ord('a'), ord('A'), 10, 13):  # Activate
+        elif key in (10, 13):                      # Enter — activate
             self._m.set_active_wcs(self._wcs_sel)
         elif key in (ord('m'), ord('M')):          # Move to stored origin
             if self._wcs_sel == 0:
@@ -595,12 +595,15 @@ class TUI:
             if self._wcs_data and self._wcs_data[self._wcs_sel]:
                 ox, oy, oz, oa = self._wcs_data[self._wcs_sel]
                 self._m.move_to_machine_pos(ox, oy, oz, oa)
-        elif key in (ord('o'), ord('O')):         # Overwrite with current position
+        elif key in (ord('x'), ord('X'),
+                     ord('y'), ord('Y'),
+                     ord('z'), ord('Z'),
+                     ord('a'), ord('A')):          # Overwrite one axis with current position
             if self._wcs_sel == 0:
                 return   # cannot overwrite MCS
             slot = self._wcs_sel
-            self._m.capture_origin(slot)
-            if self._wcs_data:
+            axis = chr(key).upper()
+            if self._m.partial_update_wcs_origin(slot, axis) and self._wcs_data:
                 self._wcs_data[slot] = self._m.get_wcs_origin(slot)
         elif key in (ord('r'), ord('R')):         # Reload all origins from device
             self._wcs_data    = None
@@ -672,7 +675,7 @@ class TUI:
 
         # Key reference — separator at dh-3, keys at dh-2, border at dh-1
         ref_row = dh - 3
-        keys = ' ↑↓ navigate   Enter/A activate   M move to   O overwrite   R reload   Esc close'
+        keys = ' ↑↓ navigate   ↵ activate   M move to   XYZA overwrite axis   R reload   Esc close'
         win.addstr(ref_row,     1, '─' * (dw - 2), CP(_CP_LABEL))
         win.addstr(ref_row + 1, 1, keys[:dw - 2],  CP(_CP_KEYS))
 

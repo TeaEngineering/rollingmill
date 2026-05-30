@@ -5,6 +5,8 @@ as part of the cut job setup flow (`execute_cut_job` → `apply_axis_config_to_d
 
 If a tool-diameter offset is not set by G10 in the NC code, in advance of activating Tool Diameter Offset (G41 left, or G42 right) then these stored values are used.
 
+There is also an NC setting for Mode A and Mode B for tool offsets (unknown function and purpose - manual p87).
+
 A similar system exists for Tool Length Offset (G43 enables, G49 cancels).
 
 ---

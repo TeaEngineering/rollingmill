@@ -60,7 +60,6 @@ KNOWN_WVALUES: dict = {
     0x04f6: 'waypoint',               # SET; relative milling waypoint (speed=0xFFFF)
     0x04f7: 'abs_move',               # SET; absolute position '>HH4i' (spd,0xFFFF,X,Y,Z,A)
     # ── Spindle / motor ──────────────────────────────────────────────────────
-    0x03f2: 'origin_capture',         # SET bare trigger (also used as "resume")
     0x03f3: 'stop',                   # SET bare trigger; immediate motion stop
     0x03f5: 'keepalive',              # SET 1-byte payload; every 200ms
     0x0307: 'feed_override_pct',      # SET 1 byte (10-200)
@@ -94,6 +93,8 @@ KNOWN_WVALUES: dict = {
     0x2012: 'motion_limits',          # SET 2×uint32; waits ping bit21
     0x3107: 'axis_config',            # SET 6 bytes; waits ping bit21
     **{0x347b + i: f'axis_param_{i + 1}' for i in range(8)},  # 0x347b..0x3482
+    # unknown
+    0x03f2: 'unknown_0x3f2',          # SET possible "resume"
 }
 
 # ── Pattern B trigger set ─────────────────────────────────────────────────────
