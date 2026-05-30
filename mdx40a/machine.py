@@ -815,6 +815,68 @@ class MDX40A:
         except usb.core.USBError as e:
             log.warning("move_to_machine_pos failed: %s", e)
 
+    # ── Move-to-origin presets (firmware-resolved) ────────────────────────────
+
+    _VALID_MOVE_AXIS_MASKS = (1, 2, 3, 4, 8)   # X, Y, XY, Z, A — see docs/usb-protocol.md
+
+    def _send_bracketed(self, wValue: int, payload: bytes, log_msg: str) -> None:
+        """Send a single SET wrapped in the 0x1109 operation bracket."""
+        try:
+            _usb.vend_set(self._dev, 0x1109, b'\x00')
+            _usb.vend_set(self._dev, wValue, payload)
+            _usb.vend_set(self._dev, 0x1109, b'\xff')
+            log.info(log_msg)
+        except usb.core.USBError as e:
+            log.warning("SET 0x%04x failed: %s", wValue, e)
+
+    def move_to_view_position(self, speed: int = JOG_SPEED_MAX) -> None:
+        """Move to the parked front-of-bed View Position (SET 0x0500).
+
+        RE: move_to_view_position_x0500 @ 0x41c3f0 — send_trigger_u16_array(0x500, &speed, 1).
+        Used by the main panel's Move button (target = "View Position").
+        """
+        self._send_bracketed(0x0500, struct.pack('>H', speed),
+                             f"Move to View Position (speed={speed})")
+
+    def move_to_origin(
+        self,
+        axis_mask: int,
+        wcs: Optional[int] = None,
+        speed: int = JOG_SPEED_MAX,
+    ) -> None:
+        """Move the selected axes to their stored origin in the given WCS (SET 0x3501).
+
+        Payload `>HHH` — (wcs_code, axis_mask, speed). `wcs` defaults to the
+        currently-active WCS. `axis_mask` is a bitfield: 1=X, 2=Y, 4=Z, 8=A
+        (and combinations: 3=XY). VPanel only ever sends {1, 2, 3, 4, 8} from
+        the Move dropdown — anything else is rejected.
+
+        RE: MdxAction_x3501_MegaDispatch @ 0x403eb0 leaves.
+        See docs/usb-protocol.md "Move-to-origin payload" for full encoding.
+        """
+        if axis_mask not in self._VALID_MOVE_AXIS_MASKS:
+            raise ValueError(
+                f"axis_mask must be one of {self._VALID_MOVE_AXIS_MASKS}, got {axis_mask}"
+            )
+        wcs_code = self._active_wcs if wcs is None else wcs
+        self._send_bracketed(
+            0x3501, struct.pack('>HHH', wcs_code, axis_mask, speed),
+            f"Move to origin: wcs={wcs_code} mask=0x{axis_mask:x} speed={speed}",
+        )
+
+    def move_to_rotation_center_y(self, speed: int = JOG_SPEED_MAX) -> None:
+        """Move Y onto the rotary A-axis centreline (SET 0x3808, mode=2).
+
+        Payload `>HH` — (mode=2, speed). Rotary-attachment-only function;
+        firmware uses the stored centreline (see get_rotary_axis_centreline)
+        to compute the Y target. Z is untouched.
+
+        RE: move_to_rotation_centre_x3808 @ 0x41b1a0 —
+        send_trigger_u16_array(0x3808, &[2, speed], 2).
+        """
+        self._send_bracketed(0x3808, struct.pack('>HH', 2, speed),
+                             f"Move Y to rotation centre (speed={speed})")
+
     # ── Internal ─────────────────────────────────────────────────────────────
 
     _SPINDLE_POLL_INTERVAL = 60.0  # seconds between get_spindle_time() refreshes (wall-clock, not call count)

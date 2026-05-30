@@ -118,7 +118,12 @@ Payloads are given in Python `struct.pack` notation.
 | `0x03f3` | (bare) | **Motion stop** (`send_motion_stop`) — immediately halts any in-flight motion. |
 | `0x1109` | 1 byte: `0x00` = begin, `0xFF` = end | **Operation bracket.** Must wrap all jog, move-to, and NC job sequences. |
 
-All three jog/move commands share the same 20-byte `'>HH4i'` payload layout:
+| `0x3501` | `>HHH` — wcs_code, axis_mask, speed | **Move selected axes to their stored origin in the selected WCS.** See "Move-to-origin payload" below. |
+| `0x3808` | `>HH` — mode (`2`), speed | **Move Y to centre of rotary A-axis.** Mode byte always `2`; speed `0xFFFF` = firmware max. Rotary-only entry of the Move dropdown. |
+| `0x0500` | `>H` — speed | **Move to View Position.** Single uint16 = speed (`0xFFFF` = firmware max). Parks the machine in the front-of-bed view pose for workpiece load/unload. |
+
+
+All three `0x04f_` jog/move commands share the same 20-byte `'>HH4i'` payload layout:
 
 ```
 bytes  0–1   uint16  speed  (mm/min; 0xFFFF = firmware max)
@@ -129,6 +134,50 @@ bytes 12–15  int32   Z
 bytes 16–19  int32   A      (1/1000 degree, signed)
 ```
 
+#### Move-to-origin payload (`SET 0x3501`, 6 bytes)
+
+`>HHH` — three big-endian uint16s:
+
+```
+bytes 0–1   uint16  wcs_code     (which work coordinate system's origin to use)
+bytes 2–3   uint16  axis_mask    (bitfield: which axes participate in the move)
+bytes 4–5   uint16  speed        (mm/min; 0xFFFF = firmware max, what VPanel always sends)
+```
+
+**`wcs_code`** mirrors the Coordinate-System dropdown's item-data:
+
+| Value | WCS slot |
+|-------|----------|
+| `0` | MCS (machine coordinates — origin = `(0,0,0,0)`) |
+| `1` | WCS1 |
+| `2` | EXOFS (the secondary G54-style offset shown as "EXOFS" in the dropdown) |
+| `3`..`9` | WCS3..WCS9 |
+| `10`..`309` | Extended WCS slots (not exposed in the standard dropdown) |
+
+**`axis_mask`** selects which axes are commanded to move (bitfield, multiple bits = simultaneous move):
+
+| Bit | Mask | Axis |
+|-----|------|------|
+| 0 | `0x01` | X |
+| 1 | `0x02` | Y |
+| 2 | `0x04` | Z |
+| 3 | `0x08` | A |
+
+Observed values from the Move dropdown:
+
+| `axis_mask` | Effect |
+|-------------|--------|
+| `1` | Move X to origin |
+| `2` | Move Y to origin |
+| `3` | Move XY to origin (simultaneous) |
+| `4` | Move Z to origin |
+| `8` | Move A to origin (rotary-only entry) |
+
+RE: `move_to_origin_dispatch_x3501 @ 0x00403eb0` dispatches one of ~45 leaf functions
+selected by `(wcs_code, axis_mask)`; each leaf builds the 3-uint16 payload above and
+calls `send_trigger_u16_array(0x3501, ...)`. Invoked from the Move button
+(`on_cmd_move_dispatch @ 0x00415ae0`, control ID `0x1fe1`) on the main panel.
+
 ### Spindle
 
 | wValue | Payload | Notes |
@@ -136,7 +185,6 @@ bytes 16–19  int32   A      (1/1000 degree, signed)
 | `0x3006` | `>I` — RPM uint32 | Set spindle speed (0 = off). |
 | `0x3008` | 1 byte (10–200) | Spindle speed override % |
 | `0x3009` | (bare) | Spindle stop; followed by `wait_busy_bits_clear` in drilling sequences |
-| `0x3808` | `<HH` — RPM uint16, mode=2 | NC S-word spindle speed; sent during NC job only |
 | `0x3809` | `<HH` — [1, 0xFFFF] start / [0, 0] stop | Rotary A-axis drilling mode (continuous slow rotation) |
 | `0x3901` | `>I` — RPM uint32 | Write spindle target RPM (4500–15000); poll ping bit 21 clear after |
 | `0x2425` | (bare) | Reset spindle rotation time counter to zero; poll ping bit 21 clear after |

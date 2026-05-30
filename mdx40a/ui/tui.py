@@ -18,7 +18,8 @@ Keybindings:
   < / >      spindle target RPM  −500 / +500
   - / +      spindle & feed override %  −10 / +10
   c          open coordinate systems dialog (activate / move-to / overwrite)
-  m          move to position (enter XYZA numerically)
+  m          open Move-To picker (presets + User Specify numeric entry)
+  p          extras — log axis snapshot (RE: unknown_config_reads 0x5f0+0x3804)
   q          quit
 
 Cut panel (visible when --file is given):
@@ -119,7 +120,10 @@ class TUI:
         self._wcs_sel            = 0        # selected row: 0=MCS, 1-10=WCS1-10
         self._wcs_data           : Optional[list] = None   # list[11] of (x,y,z,a)|None
         self._wcs_loading        = False
-        self._coord_entry_pending = False   # set by 'c' key; consumed in run loop
+        self._coord_entry_pending = False   # set by Move picker's User Specify entry; consumed in run loop
+        # Move-To picker state ('m' key)
+        self._move_open          = False
+        self._move_sel           = 0
         self._drill_active        = False   # A-axis rotary drill mode (SET 0x3809)
         # NC cut panel
         self._cut_job: Optional[CutJob] = None
@@ -211,6 +215,9 @@ class TUI:
         if self._tool_open:
             self._tool_handle_key(key)
             return
+        if self._move_open:
+            self._move_handle_key(key)
+            return
 
         if key == 27:                                  # Esc — cancel an in-flight jog
             if self._jog_armed:
@@ -287,9 +294,11 @@ class TUI:
         elif key in (ord('c'), ord('C')):
             self._wcs_open_dialog()
         elif key in (ord('m'), ord('M')):
-            self._coord_entry_pending = True   # signal draw loop to run modal entry
+            self._move_open_dialog()
         elif key in (ord('t'), ord('T')):
             self._tool_open_dialog()
+        elif key in (ord('p'), ord('P')):
+            self._m.fetch_axis_snapshot()
 
     def _start_jog(self, axis: str, sign: int) -> None:
         if self._jog_armed:
@@ -416,6 +425,9 @@ class TUI:
 
         if self._tool_open:
             self._draw_tool_dialog(stdscr, rows, cols)
+
+        if self._move_open:
+            self._draw_move_dialog(stdscr, rows, cols)
 
     def _draw_state(self, win: curses.window, height: int, cols: int) -> None:
         s     = self._m.state
@@ -675,7 +687,7 @@ class TUI:
 
         # Key reference — separator at dh-3, keys at dh-2, border at dh-1
         ref_row = dh - 3
-        keys = ' ↑↓ navigate   ↵ activate   M move to   XYZA overwrite axis   R reload   Esc close'
+        keys = ' ↑↓ navigate   ↵ activate   M move to   XYZA overwrite axis   Esc close'
         win.addstr(ref_row,     1, '─' * (dw - 2), CP(_CP_LABEL))
         win.addstr(ref_row + 1, 1, keys[:dw - 2],  CP(_CP_KEYS))
 
@@ -792,6 +804,106 @@ class TUI:
 
         win.refresh()
 
+    # ── Move-To picker ('m' key) ──────────────────────────────────────────────
+
+    def _move_targets(self) -> list:
+        """Return [(label, action_callable_or_None), ...] for the picker.
+
+        Each callable is invoked on Enter and takes no args. The User Specified
+        entry uses None as a sentinel — the handler closes the picker and
+        queues the existing numeric-entry modal via `_coord_entry_pending`.
+        Rotary-only entries are gated on the live `rotary_extension_byte`.
+        """
+        m = self._m
+        targets = [
+            ('View Position',     lambda: m.move_to_view_position()),
+            ('X Origin',          lambda: m.move_to_origin(0x1)),
+            ('Y Origin',          lambda: m.move_to_origin(0x2)),
+            ('Z Origin',          lambda: m.move_to_origin(0x4)),
+            ('XY Origin',         lambda: m.move_to_origin(0x3)),
+        ]
+        rotary = m.rotary_extension_byte
+        if rotary is not None and rotary >= 1:
+            targets.append(('A Origin',          lambda: m.move_to_origin(0x8)))
+        if rotary is not None and rotary >= 2:
+            targets.append(('Rotation center Y', lambda: m.move_to_rotation_center_y()))
+        targets.append(('User Specified…', None))   # None → open numeric entry dialog
+        return targets
+
+    def _move_open_dialog(self) -> None:
+        self._move_open = True
+        self._move_sel  = 0
+
+    def _move_handle_key(self, key: int) -> None:
+        targets = self._move_targets()
+        if key in (27, ord('q'), ord('Q')):
+            self._move_open = False
+            return
+        if key == curses.KEY_UP:
+            self._move_sel = max(0, self._move_sel - 1)
+        elif key == curses.KEY_DOWN:
+            self._move_sel = min(len(targets) - 1, self._move_sel + 1)
+        elif key in (10, 13):
+            label, action = targets[self._move_sel]
+            t = _trace.get_active()
+            if t:
+                t.annotate(f"KEY m  move target={label!r}")
+            if action is None:
+                # User Specify — close picker, queue numeric entry modal
+                self._move_open = False
+                self._coord_entry_pending = True
+            else:
+                try:
+                    action()
+                except Exception as exc:
+                    logging.getLogger('tui').error("Move target %r failed: %s", label, exc)
+
+    def _draw_move_dialog(self, stdscr: curses.window, rows: int, cols: int) -> None:
+        CP   = curses.color_pair
+        BOLD = curses.A_BOLD
+
+        targets = self._move_targets()
+
+        # Clamp selection in case rotary status changed since open.
+        if self._move_sel >= len(targets):
+            self._move_sel = len(targets) - 1
+
+        dh = min(6 + len(targets), rows - 2)
+        dw = min(48, cols - 2)
+        dy = (rows - dh) // 2
+        dx = (cols - dw) // 2
+
+        try:
+            win = curses.newwin(dh, dw, dy, dx)
+        except curses.error:
+            return
+
+        win.erase()
+        win.box()
+
+        wcs_lbl = 'MCS' if self._m.active_wcs == 0 else f'WCS{self._m.active_wcs}'
+        title = f' Move To  (using {wcs_lbl})'
+        win.addstr(0, 2, title[:dw - 4], CP(_CP_HEADER) | BOLD)
+        win.addstr(1, 1, '─' * (dw - 2), CP(_CP_LABEL))
+
+        for i, (label, _action) in enumerate(targets):
+            row = 2 + i
+            if row >= dh - 3:
+                break
+            is_sel = (i == self._move_sel)
+            attr   = CP(_CP_ACTIVE) | BOLD if is_sel else CP(_CP_VALUE)
+            try:
+                win.addstr(row, 1, f'  {label} '.ljust(dw - 2)[:dw - 2], attr)
+            except curses.error:
+                pass
+
+        ref_row = dh - 3
+        keys = ' ↑↓ navigate   ↵ execute   Esc close'
+        win.addstr(ref_row,     1, '─' * (dw - 2), CP(_CP_LABEL))
+        win.addstr(ref_row + 1, 1, keys[:dw - 2],  CP(_CP_KEYS))
+
+        win.refresh()
+
     # ── Coordinate entry dialog (blocking, 'c' key) ───────────────────────────
 
     def _coord_entry_dialog(self, stdscr: curses.window) -> None:
@@ -820,10 +932,10 @@ class TUI:
         win.addstr(1, 2, 'Leave blank to keep current value.', CP(_CP_LABEL))
         win.addstr(2, 2, '─' * (dw - 4), CP(_CP_LABEL))
         win.addstr(9, 2, '─' * (dw - 4), CP(_CP_LABEL))
-        win.addstr(10, 2, '[Enter] move    [Esc] cancel', CP(_CP_KEYS))
+        win.addstr(10, 2, '[Enter] move   [↑↓] field   [Esc] cancel', CP(_CP_KEYS))
 
-        # Switch to blocking echo mode for text entry
-        curses.echo()
+        # Blocking, no-echo input — we draw chars manually so Esc/Backspace work.
+        curses.noecho()
         curses.curs_set(1)
         win.nodelay(False)
         win.keypad(True)
@@ -834,46 +946,74 @@ class TUI:
             ('Z', dz, 'mm'),
             ('A', da, '° '),
         ]
-        entered: list = [None, None, None, None]
+        bufs      = ['', '', '', '']   # per-axis edit buffer
+        sel       = 0                   # currently-selected axis
         cancelled = False
+        MAX_LEN   = 8
 
-        try:
+        # Pre-compute the input column once — all 4 prompts have the same width.
+        sample_prompt = f'  X (mm)  current {0.0:>+10.3f}  → '
+        inp_x = min(1 + len(sample_prompt), dw - 10)
+
+        def redraw():
             for i, (axis, cur, unit) in enumerate(axes_info):
-                row = 3 + i * 1 + i   # rows 3, 5, 7 — but let's do 3,4,5,6
                 row = 3 + i
                 prompt = f'  {axis} ({unit})  current {cur:>+10.3f}  → '
-                win.addstr(row, 1, prompt[:dw - 2], CP(_CP_LABEL))
-                win.refresh()
-                # input field at end of prompt
-                inp_x = 1 + len(prompt)
-                inp_x = min(inp_x, dw - 10)
+                attr   = (CP(_CP_ACTIVE) | BOLD) if i == sel else CP(_CP_LABEL)
+                win.addstr(row, 1, prompt[:dw - 2], attr)
+                # Render this axis's buffer, padded with spaces so backspace shows through.
+                win.addstr(row, inp_x, bufs[i].ljust(MAX_LEN), CP(_CP_VALUE) | BOLD)
+            win.move(3 + sel, inp_x + len(bufs[sel]))
+            win.refresh()
+
+        try:
+            while True:
+                redraw()
                 try:
-                    raw = win.getstr(row, inp_x, 8).decode('ascii', errors='ignore').strip()
+                    ch = win.getch()
                 except curses.error:
-                    raw = ''
-                # ESC check: getstr can't detect ESC mid-string; we allow blank=keep
-                if raw:
-                    try:
-                        entered[i] = float(raw)
-                    except ValueError:
-                        win.addstr(row, inp_x + 9, ' ?bad', CP(_CP_LOG_WARN))
-                        win.refresh()
-        except KeyboardInterrupt:
-            cancelled = True
+                    cancelled = True
+                    break
+                if ch == 27:                                       # Esc — cancel
+                    cancelled = True
+                    break
+                if ch in (10, 13):                                 # Enter — commit
+                    break
+                if ch == curses.KEY_UP:
+                    sel = max(0, sel - 1)
+                elif ch == curses.KEY_DOWN:
+                    sel = min(len(axes_info) - 1, sel + 1)
+                elif ch in (curses.KEY_BTAB,):                     # Shift-Tab
+                    sel = max(0, sel - 1)
+                elif ch == 9:                                       # Tab
+                    sel = min(len(axes_info) - 1, sel + 1)
+                elif ch in (127, curses.KEY_BACKSPACE, 8):
+                    if bufs[sel]:
+                        bufs[sel] = bufs[sel][:-1]
+                elif 32 <= ch < 128 and len(bufs[sel]) < MAX_LEN:
+                    c = chr(ch)
+                    if (c.isdigit()
+                            or (c == '.' and '.' not in bufs[sel])
+                            or (c == '-' and not bufs[sel])):
+                        bufs[sel] += c
         finally:
-            curses.noecho()
             curses.curs_set(0)
 
         if cancelled:
             return
 
-        # Fill blanks with current display values
-        final_display = [
-            entered[0] if entered[0] is not None else dx,
-            entered[1] if entered[1] is not None else dy,
-            entered[2] if entered[2] is not None else dz,
-            entered[3] if entered[3] is not None else da,
-        ]
+        # Parse buffers; empty → keep current display value.
+        defaults = (dx, dy, dz, da)
+        final_display = []
+        for b, default in zip(bufs, defaults):
+            b = b.strip()
+            if not b:
+                final_display.append(default)
+                continue
+            try:
+                final_display.append(float(b))
+            except ValueError:
+                final_display.append(default)
 
         # Convert WCS-relative display coords back to machine coords
         ox, oy, oz, oa = self._m.wcs_offset
