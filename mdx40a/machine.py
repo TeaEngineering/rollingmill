@@ -524,6 +524,59 @@ class MDX40A:
             log.warning("get_device_status_0x3804 failed: %s", e)
             return None
 
+    def fetch_axis_snapshot(self) -> None:
+        """Reproduce VPanel's pre-cut-job axis snapshot for diagnostics.
+        My guess is that this is scaled XYZA position, ie. after applying
+        G50/G51 scaling and perhaps workspace transformations. TBD.
+
+        RE: unknown_config_reads @ 0x004017d0 — reads trigger 0x5f0 (8×uint32
+        = 4 numerator/denominator pairs, XYZA) and trigger 0x3804 (6×uint32),
+        then applies the same float scaling VPanel writes onto its dialog
+        struct. Raw and scaled values are emitted to the log; nothing is
+        cached on self.
+
+        Scaling constants from VP_MDX40A.exe:
+          DOUBLE_0043e9e8 = 100.0      (final ×100 in unknown_config_reads)
+          DOUBLE_004413c8 = 0.000001   (per-axis (5 - trunc(ratio))/10 * k)
+        """
+        SCALE_E9E8  = 100.0
+        SCALE_413C8 = 0.000001
+
+        # 0x5f0: 8 × uint32 BE = 4 numerators + 4 denominators (X, Y, Z, A)
+        try:
+            data = _usb.trigger_read_b(self._dev, 0x5f0, 32)
+            if data is None or len(data) < 32:
+                log.warning("fetch_axis_snapshot 0x5f0: short/no response (%s)",
+                            None if data is None else len(data))
+            else:
+                nums   = struct.unpack_from('>4I', bytes(data), 0)
+                denoms = struct.unpack_from('>4I', bytes(data), 16)
+                log.info("0x5f0 raw      nums=%s  denoms=%s", nums, denoms)
+                scaled = []
+                for n, d in zip(nums, denoms):
+                    ratio = (n / d) if d else 0.0
+                    # (double)((5 - (int)ratio) / 10) * 0.000001
+                    stage = int((5 - int(ratio)) / 10) * SCALE_413C8
+                    # then *= 100.0 in unknown_config_reads
+                    scaled.append(stage * SCALE_E9E8)
+                log.info("0x5f0 stored   XYZA=%s", scaled)
+        except usb.core.USBError as e:
+            log.warning("fetch_axis_snapshot 0x5f0 failed: %s", e)
+
+        # 0x3804: 6 × uint32 BE — stored at field101_0x8c..field109_0xa0
+        try:
+            data = _usb.trigger_read_b(self._dev, 0x3804, 24)
+            if data is None or len(data) < 24:
+                log.warning("fetch_axis_snapshot 0x3804: short/no response (%s)",
+                            None if data is None else len(data))
+            else:
+                vals = struct.unpack_from('>6I', bytes(data))
+                log.info("0x3804 raw     %s", vals)
+                log.info("0x3804 stored  f101=%d X=%d Y=%d Z=%d A=%d f109=%d",
+                         *vals)
+        except usb.core.USBError as e:
+            log.warning("fetch_axis_snapshot 0x3804 failed: %s", e)
+
     def _wait_ping_bit21(self, timeout: float = 3.0) -> bool:
         """Poll GET 0x0001 until bit 21 (_PING_BIT21) clears — firmware command ack.
 
