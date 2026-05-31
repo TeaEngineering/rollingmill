@@ -59,6 +59,7 @@ KNOWN_WVALUES: dict = {
     0x04f5: 'jog',                    # SET; relative displacement '>HH4i' (spd,0,X,Y,Z,A)
     0x04f6: 'waypoint',               # SET; relative milling waypoint (speed=0xFFFF)
     0x04f7: 'abs_move',               # SET; absolute position '>HH4i' (spd,0xFFFF,X,Y,Z,A)
+    0x3801: 'get_rotary_axis',        # SET '>IIII' XYZA
     # ── Spindle / motor ──────────────────────────────────────────────────────
     0x03f3: 'stop',                   # SET bare trigger; immediate motion stop
     0x03f5: 'keepalive',              # SET 1-byte payload; every 200ms
@@ -106,6 +107,7 @@ _PATTERN_B: frozenset = frozenset({
     0x3900,
     0x0101,
     0x030b,
+    0x3801,
     *range(0x3202, 0x320b),   # WCS reads 2-10
 })
 

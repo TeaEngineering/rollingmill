@@ -108,7 +108,9 @@ All status/config queries use Pattern B. The polling step is mandatory — firin
 All SET commands are vendor control OUT transfers with `bRequest=0x01`.
 Payloads are given in Python `struct.pack` notation.
 
-### Motion
+### Motion & Moves
+
+Payload layouts and dispatch detail live in [move-commands.md](move-commands.md).
 
 | wValue | Payload | Notes |
 |--------|---------|-------|
@@ -117,66 +119,9 @@ Payloads are given in Python `struct.pack` notation.
 | `0x04f7` | `>HH4i` — speed, `0xFFFF`, absX, absY, absZ, absA | **Absolute move.** Absolute machine coords in 1/1000 mm. |
 | `0x03f3` | (bare) | **Motion stop** (`send_motion_stop`) — immediately halts any in-flight motion. |
 | `0x1109` | 1 byte: `0x00` = begin, `0xFF` = end | **Operation bracket.** Must wrap all jog, move-to, and NC job sequences. |
-
-| `0x3501` | `>HHH` — wcs_code, axis_mask, speed | **Move selected axes to their stored origin in the selected WCS.** See "Move-to-origin payload" below. |
+| `0x3501` | `>HHH` — wcs_code, axis_mask, speed | **Move selected axes to stored origin in selected WCS.** See [move-commands.md](move-commands.md#move-to-origin--set-0x3501-6-bytes-hhh). |
 | `0x3808` | `>HH` — mode (`2`), speed | **Move Y to centre of rotary A-axis.** Mode byte always `2`; speed `0xFFFF` = firmware max. Rotary-only entry of the Move dropdown. |
 | `0x0500` | `>H` — speed | **Move to View Position.** Single uint16 = speed (`0xFFFF` = firmware max). Parks the machine in the front-of-bed view pose for workpiece load/unload. |
-
-
-All three `0x04f_` jog/move commands share the same 20-byte `'>HH4i'` payload layout:
-
-```
-bytes  0–1   uint16  speed  (mm/min; 0xFFFF = firmware max)
-bytes  2–3   uint16  flags  (0x0000 = relative delta, 0xFFFF = absolute target)
-bytes  4–7   int32   X      (1/1000 mm, signed)
-bytes  8–11  int32   Y
-bytes 12–15  int32   Z
-bytes 16–19  int32   A      (1/1000 degree, signed)
-```
-
-#### Move-to-origin payload (`SET 0x3501`, 6 bytes)
-
-`>HHH` — three big-endian uint16s:
-
-```
-bytes 0–1   uint16  wcs_code     (which work coordinate system's origin to use)
-bytes 2–3   uint16  axis_mask    (bitfield: which axes participate in the move)
-bytes 4–5   uint16  speed        (mm/min; 0xFFFF = firmware max, what VPanel always sends)
-```
-
-**`wcs_code`** mirrors the Coordinate-System dropdown's item-data:
-
-| Value | WCS slot |
-|-------|----------|
-| `0` | MCS (machine coordinates — origin = `(0,0,0,0)`) |
-| `1` | WCS1 |
-| `2` | EXOFS (the secondary G54-style offset shown as "EXOFS" in the dropdown) |
-| `3`..`9` | WCS3..WCS9 |
-| `10`..`309` | Extended WCS slots (not exposed in the standard dropdown) |
-
-**`axis_mask`** selects which axes are commanded to move (bitfield, multiple bits = simultaneous move):
-
-| Bit | Mask | Axis |
-|-----|------|------|
-| 0 | `0x01` | X |
-| 1 | `0x02` | Y |
-| 2 | `0x04` | Z |
-| 3 | `0x08` | A |
-
-Observed values from the Move dropdown:
-
-| `axis_mask` | Effect |
-|-------------|--------|
-| `1` | Move X to origin |
-| `2` | Move Y to origin |
-| `3` | Move XY to origin (simultaneous) |
-| `4` | Move Z to origin |
-| `8` | Move A to origin (rotary-only entry) |
-
-RE: `move_to_origin_dispatch_x3501 @ 0x00403eb0` dispatches one of ~45 leaf functions
-selected by `(wcs_code, axis_mask)`; each leaf builds the 3-uint16 payload above and
-calls `send_trigger_u16_array(0x3501, ...)`. Invoked from the Move button
-(`on_cmd_move_dispatch @ 0x00415ae0`, control ID `0x1fe1`) on the main panel.
 
 ### Spindle
 
@@ -199,8 +144,8 @@ calls `send_trigger_u16_array(0x3501, ...)`. Invoked from the Move button
 
 | wValue | Payload | Notes |
 |--------|---------|-------|
-| `0x030c` | `>4i` — X, Y, Z, A (1/1000 mm) | Write WCS1 origin |
-| `0x3335`–`0x333d` | `>4i` — X, Y, Z, A | Write WCS2–10 origins |
+| `0x030c` | `>4i` — X, Y, Z, A (1/1000 mm) | Write WCS1 origin; poll ping bit 21 clear after |
+| `0x3335`–`0x333d` | `>4i` — X, Y, Z, A | Write WCS2–10 origins; poll ping bit 21 clear after each |
 
 ### Axis configuration / tool offsets
 
@@ -270,4 +215,4 @@ sending the next command. Poll `GET 0x0001` until bit 21 (`0x00200000`) clears,
 3-second timeout (`wait_ping_bit21_clear` @ `FUN_0041b930`):
 
 Commands that require this wait: `SET 0x3901`, `SET 0x2425`, `SET 0x3107`,
-`SET 0x347b`–`SET 0x3482`, `SET 0x2012`.
+`SET 0x347b`–`SET 0x3482`, `SET 0x2012`, `SET 0x030c`, `SET 0x3335`–`SET 0x333d`.

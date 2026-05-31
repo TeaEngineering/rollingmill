@@ -307,13 +307,14 @@ class MDX40A:
         jog_wait_busy_bits_clear @ 0x00417b00 loops while bits 2 or 21 of this
         word are set, so jog completion = (last_ping_word & 0x00200004) == 0.
 
-        Returns the uint32 (LE-decoded), or None on USB error / short response.
+        Returns the raw 4 bytes as an integer, as the bytes are not endian swapped,
+        or None on USB error / short response.
         """
         try:
             data = _usb.vend_get(self._dev, 0x0001, 4)
             if len(data) < 4:
                 return None
-            word = struct.unpack_from('>I', data)[0]
+            word = struct.unpack_from('<I', data)[0]
             self._last_ping_word = word
             return word
         except usb.core.USBError:
@@ -622,11 +623,15 @@ class MDX40A:
     def write_wcs_origin(
         self, slot: int,
         x_mm: float, y_mm: float, z_mm: float, a_deg: float,
-    ) -> None:
+    ) -> bool:
         """Write an explicit XYZA value into a WCS origin slot (1-10).
 
-        RE: FUN_00403a40 — SET 0x030c (WCS1) / 0x3335-0x333d (WCS2-10), 4×uint32 BE.
+        RE: MdxAction_x3300+p1_dest (and the WCS1 0x030c variant) — SET wValue
+        with 4×uint32 BE, then poll ping bit 21 clear for firmware ack.
+        Without the post-write wait, following actions will abort.
         Updates the display offset cache if this slot is currently active.
+        Returns True if the firmware acknowledged the write within the
+        ping-bit-21 timeout, False on USB error or timeout.
         """
         if not 1 <= slot <= 10:
             raise ValueError(f"WCS slot must be 1–10, got {slot}")
@@ -644,6 +649,8 @@ class MDX40A:
                 self._wcs_offset = (x_mm, y_mm, z_mm, a_deg)
         except usb.core.USBError as e:
             log.warning("write_wcs_origin(%d) failed: %s", slot, e)
+            return False
+        return self._wait_ping_bit21()
 
     def partial_update_wcs_origin(self, slot: int, axis: str) -> bool:
         """Overwrite one axis of a stored WCS origin with the live machine position.
@@ -674,8 +681,7 @@ class MDX40A:
         else:
             a = s.a_deg
 
-        self.write_wcs_origin(slot, x, y, z, a)
-        return True
+        return self.write_wcs_origin(slot, x, y, z, a)
 
     # ── Tool diameter offsets ─────────────────────────────────────────────────
 
