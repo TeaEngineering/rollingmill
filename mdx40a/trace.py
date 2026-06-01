@@ -7,10 +7,11 @@ Each control transfer is written as a single line to a text file under
 Line format (one transfer per line):
   HH:MM:SS.sss > SET wv=0x04f7 20: 03e8ffff00002af0...
   HH:MM:SS.sss < GET wv=0x0100 32: 0682081c000008ac...
+  HH:MM:SS.sss > BULK 32: 5047...                # raw NC code on bulk-OUT endpoint
   HH:MM:SS.sss ! ERR SET wv=0x0004  [Errno 32] Pipe error
   HH:MM:SS.sss # comment / marker
 
-'>' = host→device (SET), '<' = device→host (GET), '!' = error, '#' = annotation.
+'>' = host→device (SET/BULK), '<' = device→host (GET), '!' = error, '#' = annotation.
 """
 
 import os
@@ -53,8 +54,15 @@ class Tracer:
     def log_get(self, wvalue: int, data: bytes) -> None:
         self._write(f"< GET wv=0x{wvalue:04x} {len(data)}: {bytes(data).hex()}")
 
-    def log_error(self, direction: str, wvalue: int, exc: Exception) -> None:
-        self._write(f"! ERR {direction} wv=0x{wvalue:04x}  {exc}")
+    def log_bulk(self, data: bytes) -> None:
+        """Log a bulk-OUT transfer (raw NC code stream)."""
+        self._write(f"> BULK {len(data)}: {bytes(data).hex()}")
+
+    def log_error(self, direction: str, wvalue: Optional[int], exc: Exception) -> None:
+        if wvalue is None:
+            self._write(f"! ERR {direction}  {exc}")
+        else:
+            self._write(f"! ERR {direction} wv=0x{wvalue:04x}  {exc}")
 
     def annotate(self, text: str) -> None:
         """Write a free-text marker line (e.g. key pressed, jog axis/dist)."""
@@ -78,6 +86,7 @@ class Tracer:
         traceback: TracebackType | None,
     ) -> bool | None:
         self.close()
+        print(f"Log saved to {self._path}")
         return None
 
     # ── Internal ──────────────────────────────────────────────────────────────

@@ -179,6 +179,71 @@ poll: GET wValue=0x0200 == expected?
 The firmware counter at `wValue=0x0200` (4-byte big-endian uint32) tracks bytes consumed from
 its internal NC buffer. Step completion is detected when the counter reaches `before + len(block)`.
 
+### Bytes-processed counter — `get_nc_bytes_processed_0x200` @ 0x0041c290
+
+Pattern B read: `SET 0x0200 → GET 0x0003`, 4 bytes BE → uint32. Returned through the device
+session's `read_status_op` vtable slot. Three sites consume it:
+
+| Address | Role | Predicate |
+|---|---|---|
+| `0x00405b40` | `nc_send_one_slice` | reads counter → `AutoClass33.active_coordsys = counter + slice_len` → `send_data_slice_USB(slice_base, slice_len)` |
+| `0x00405bc0` | step-mode is-done | `byte[+0x71] != 0xff && counter == active_coordsys` |
+| `0x00405bf0` | run-mode is-done | extra status-byte gate (see below) |
+
+The `active_coordsys` field name in Ghidra is misleading — at this point in the cut-job state
+machine it holds the **expected post-send counter value**, not a coordinate system.
+
+### Run-mode status byte — `AutoClass33+0x71`
+
+`FUN_00405bf0` (run-mode is-done predicate) reads the byte at `AutoClass33+0x71` — the second
+byte of the `user_cancelled_op` uint32 at offset 112 — and gates advancement on it:
+
+```c
+byte s = AutoClass33+0x71;
+if (s == 0xff)             return 0;      // aborted/cancelled — never advance
+if (s & 0x40)              return 0;      // pause-pending  (operator action required)
+if (counter != expected)   return 0;      // firmware not yet done with last block
+return (s >> 7);                          // bit 7 = "operator confirmed, advance OK"
+```
+
+Summary of bits:
+
+| Byte value / mask | Meaning |
+|---|---|
+| `0xff` (whole byte) | Aborted — stops the stream permanently |
+| bit 6 (`0x40`) | "Pause pending" — operator action required, do not advance |
+| bit 7 (`0x80`) | "Continue" — operator confirmed; combined with `counter == expected`, advance |
+
+The handshake matches `rdlm64.dll`'s `\x03ToolInfo,...;` and `\x03NextPage,...;` escape
+sequences: when those appear in the data stream, the filter raises a dialog (codes 7=continue,
+2=cancel), and the operator click toggles the bits here. Step mode skips bit 6/7 entirely —
+each `next_block()` press from the operator IS the "continue" signal — so its predicate
+(`FUN_00405bc0`) only checks the cancel sentinel and counter equality.
+
+### Cut-job dialog state table — `0x0043f370`
+
+The cut/test-cut dialog runs a four-state machine; each row is a `{on_enter, tick, on_exit,
+finalize}` vtable. The tick at `FUN_00405680` (row 3) demonstrates the step-vs-run branch via
+`AutoClass33.run_mode_byte`:
+
+```c
+tick(p):
+  if (p->run_mode_byte == 0) {            // STEP
+      if (!is_slice_done_step(p))   return p;     // counter wait
+      update_progress_ui(p);
+      if (!send_one_slice(p))       return p;     // dispatch next block
+  } else {                                 // RUN
+      if (!is_slice_done_run(p))    return p;     // counter + status-byte wait
+  }
+  finalize(p);
+```
+
+The streaming senders in rows 0 and 2 (`FUN_00405540`) use the run-mode predicate and call
+`nc_send_one_slice` after each ack — i.e. **one NC block per tick, gated on
+`counter == prev + len(block)`** even in run mode. There is no multi-block bulk burst here;
+VPanel's "32 KB" appears only at the upper `WritePrinter` boundary (see Bulk Output Flow),
+and is split block-by-block before reaching the USB.
+
 ---
 
 ## Python Implementation Notes

@@ -187,7 +187,10 @@ def trigger_read_b(
 
 def bulk_write(dev: Any, data: bytes, timeout:int=2000) -> int:
     """Write raw bytes to the bulk-OUT endpoint."""
+    t = _trace.get_active()
     if _mock:
+        if t:
+            t.log_bulk(data)
         return len(data)
     ep_out = None
     for cfg in dev:
@@ -203,4 +206,12 @@ def bulk_write(dev: Any, data: bytes, timeout:int=2000) -> int:
                     break
     if ep_out is None:
         raise usb.core.USBError("No bulk-OUT endpoint found")
-    return int(ep_out.write(data, timeout=timeout))
+    try:
+        n = int(ep_out.write(data, timeout=timeout))
+        if t:
+            t.log_bulk(data)
+        return n
+    except Exception as exc:
+        if t:
+            t.log_error("BULK", None, exc)
+        raise

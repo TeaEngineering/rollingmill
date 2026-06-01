@@ -238,15 +238,20 @@ class TUI:
         if self._cut_job:
             job = self._cut_job
             if key in (ord('r'), ord('R')):
+                self._annotate_nc_key('r', 'RUN', job)
                 job.start_run()
                 return
             if key in (ord('x'), ord('X')):
+                self._annotate_nc_key('x', 'STEP', job)
                 job.start_step()
                 return
             if key in (ord('n'), ord('N'), ord(' '), 10, 13):
+                self._annotate_nc_key(chr(key) if 32 <= key < 127 else 'ENTER',
+                                      'NEXT_BLOCK', job)
                 job.next_block()
                 return
             if key in (ord('p'), ord('P')):
+                self._annotate_nc_key('p', 'PAUSE', job)
                 job.pause()
                 return
 
@@ -299,6 +304,17 @@ class TUI:
             self._tool_open_dialog()
         elif key in (ord('p'), ord('P')):
             self._m.fetch_axis_snapshot()
+
+    def _annotate_nc_key(self, key_label: str, action: str, job: CutJob) -> None:
+        """Write a `# KEY <k> <action> ...` marker for an NC-panel key press."""
+        t = _trace.get_active()
+        if not t:
+            return
+        t.annotate(
+            f"KEY {key_label}  {action}  "
+            f"state={job.state}  block={job.block_idx}/{job.total}  "
+            f"file={job.filename!r}"
+        )
 
     def _start_jog(self, axis: str, sign: int) -> None:
         if self._jog_armed:

@@ -40,8 +40,14 @@ _LINE_RE = re.compile(
     r'^(\d{2}:\d{2}:\d{2}\.\d+)\s+'
     r'([<>!#])\s+'
     r'(?:(SET|GET)\s+wv=(0x[0-9a-fA-F]+)\s+\d+(?::\s*([0-9a-fA-F]*))?'
+    r'|(BULK)\s+\d+(?::\s*([0-9a-fA-F]*))?'
     r'|(.+))'
 )
+
+# Sentinel wValue for bulk-OUT transfers (raw NC code). Not a real wValue —
+# bulk writes don't go through control transfers — but lets parse_lines/decode_line
+# share one (ts, dir, wv, data) shape.
+BULK_WV = -1
 
 # ── Complete wValue table ─────────────────────────────────────────────────────
 # Any wValue NOT in this dict produces an "! UNKNOWN" error line.
@@ -164,6 +170,16 @@ def _decode_xyza(ts: str, label: str, data: bytes) -> str:
             f"Z={z/1000:+9.3f}  A={a/1000:+8.3f}")
 
 
+def decode_bulk(ts: str, data: bytes) -> str:
+    """Render a bulk-OUT payload. NC code is ASCII text, so show that when possible.
+    repr() escapes the CR/LF that terminate NC lines so the trace stays one line per transfer."""
+    try:
+        text = data.decode('ascii')
+    except UnicodeDecodeError:
+        return f"{ts}  NC_BULK  {len(data)}b  {data.hex()}"
+    return f"{ts}  NC_BULK  {len(data)}b  {text!r}"
+
+
 def _decode_device_status(ts: str, data: bytes) -> str:
     if len(data) < 24:
         return f"{ts}  STATUS_0x3804  [too short: {len(data)}b  {data.hex()}]"
@@ -182,6 +198,7 @@ def parse_lines(path: Path):
     """Yield (ts, direction, wv|None, data, context).
 
     Annotation ('#') lines: direction='#', wv=None, context=comment text.
+    Bulk-OUT lines: wv=BULK_WV, direction='>'.
     Data lines: context = most recent Pattern-B trigger wValue (for 0x0003 dispatch).
     """
     last_trigger: Optional[int] = None
@@ -193,13 +210,16 @@ def parse_lines(path: Path):
             m = _LINE_RE.match(line)
             if not m:
                 continue
-            ts, direction, op, wv_str, hex_data, comment = m.groups()
+            ts, direction, op, wv_str, hex_data, bulk_op, bulk_hex, comment = m.groups()
             if op:
                 wv   = int(wv_str, 16)
                 data = bytes.fromhex(hex_data) if hex_data else b''
                 if direction == '>' and wv in _PATTERN_B:
                     last_trigger = wv
                 yield ts, direction, wv, data, last_trigger
+            elif bulk_op:
+                data = bytes.fromhex(bulk_hex) if bulk_hex else b''
+                yield ts, direction, BULK_WV, data, last_trigger
             else:
                 yield ts, '#', None, b'', (comment or '')
 
@@ -216,8 +236,11 @@ def decode_line(
 ):
     """Return a display string, _SUPPRESS (silent), or _UNKNOWN (unrecognised)."""
 
+    if wv == BULK_WV:
+        return decode_bulk(ts, data)
+
     if wv not in KNOWN_WVALUES:
-        raise ValueError(f"Unknown wv value {wv}")
+        raise ValueError(f"Unknown wv value {wv:04x}")
 
     # ── Always-decoded transfers ───────────────────────────────────────────────
     if wv == 0x0100:
@@ -385,7 +408,7 @@ def show_all(path: Path, verbose: bool = False, strict: bool = False) -> bool:
             if result is _SUPPRESS:
                 continue
         except ValueError as v:
-            print(f"Unable to decode {ts=} {wv:04x=} {direction=} data={data.hex()}", file=sys.stderr)
+            print(f"Unable to decode {ts=} {wv=:04x} {direction=} data={data.hex()}", file=sys.stderr)
             clean = False
             sys.exit(1)
         else:
