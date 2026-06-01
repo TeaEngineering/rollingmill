@@ -96,10 +96,10 @@ All status/config queries use Pattern B. The polling step is mandatory — firin
 | `0x346b`–`0x3472` | `query_indexed_0x346a` (index 1–8) | 4 bytes each | Read tool diameter offsets (8 slots) |
 | `0x3701` | `get_uint32_0x3700` | 4 bytes | Single uint32 |
 | `0x3801` | `get_rotary_axis_centreline_0x3801` | 12 bytes | 3×uint32 = stored rotary A-axis centreline `[X, Y, Z]` in 1/1000 mm. Only `Y, Z` define the line (X is "along" the rotation axis, so its value is informational only). Written by the jig-detect routine via `SET 0x3803`. Read by the "Current Jig" indicator in the main panel — see [rotary-jig-alignment.md](rotary-jig-alignment.md#current-jig-indicator). |
-| `0x3804` | `get_6uint32_0x3804` | 24 bytes | 6×uint32 — unknown values used by `FUN_004017d0` |
+| `0x3804` | `get_rotary_axis_angle_correction` | 24 bytes | 6 × int32 BE in 1/1000 mm: `[refX1, ofsY1, ofsZ1, refX2, ofsY2, ofsZ2]` — rotary A-axis two-point angle correction. See [machine-calibration.md](machine-calibration.md#rotary-axis-calibration). |
 | `0x3a02` | `get_2uint32_0x3a02` | 8 bytes | 2×uint32 |
 | `0x3a05` | `get_uint32_0x3a05` | 4 bytes | Used in spindle-stop to override Z for positioning |
-| `0x05f0` | `get_unknown_axis_values_0x5f0` | 32 bytes | 8×uint32 = 4 `(value, scale)` pairs → unknown XYZA |
+| `0x05f0` | `get_XYZ_axis_scaling` | 32 bytes | 8 × uint32 BE = 4 numerators then 4 denominators (axis order X, Y, Z, A). Effective scale per axis = `numerator / denominator`. See [machine-calibration.md](machine-calibration.md#axis-scaling). |
 
 ---
 
@@ -146,6 +146,13 @@ Payload layouts and dispatch detail live in [move-commands.md](move-commands.md)
 |--------|---------|-------|
 | `0x030c` | `>4i` — X, Y, Z, A (1/1000 mm) | Write WCS1 origin; poll ping bit 21 clear after |
 | `0x3335`–`0x333d` | `>4i` — X, Y, Z, A | Write WCS2–10 origins; poll ping bit 21 clear after each |
+
+### Machine calibration (Setup → Correction tab)
+
+| wValue | Payload | Notes |
+|--------|---------|-------|
+| `0x05f1` | `>8I` — 4 numerators then 4 denominators | `set_XYZ_axis_scaling`. VPanel always sends denominators of 1,000,000, so numerator = `round(percent × 10000)`. Poll ping bit 21 clear after. See [machine-calibration.md](machine-calibration.md#axis-scaling). |
+| `0x3805` | `>6i` — `refX1, ofsY1, ofsZ1, refX2, ofsY2, ofsZ2` (1/1000 mm) | `set_rotary_axis_angle_correction`. Lower-X reference point sent first. Poll ping bit 21 clear after. See [machine-calibration.md](machine-calibration.md#rotary-axis-calibration). |
 
 ### Axis configuration / tool offsets
 
@@ -202,7 +209,8 @@ USB class SOFT_RESET      (bmRequestType=0x21, bRequest=0x02)
 GET 0x0001                (ping — confirm device responding)
 GET 0x0002                (machine type — expect high word 0x1234)
 SET 0x03f5  b'\x00'       (keepalive)
-SET 0x3804 → GET 0x0003   (device status block — 6×uint32)
+SET 0x05f0 → GET 0x0003   (axis scaling — 8×uint32, see machine-calibration.md)
+SET 0x3804 → GET 0x0003   (rotary angle correction — 6×int32)
 SET 0x3900 → GET 0x0003   (read configured spindle RPM)
 ```
 
@@ -215,4 +223,5 @@ sending the next command. Poll `GET 0x0001` until bit 21 (`0x00200000`) clears,
 3-second timeout (`wait_ping_bit21_clear` @ `FUN_0041b930`):
 
 Commands that require this wait: `SET 0x3901`, `SET 0x2425`, `SET 0x3107`,
-`SET 0x347b`–`SET 0x3482`, `SET 0x2012`, `SET 0x030c`, `SET 0x3335`–`SET 0x333d`.
+`SET 0x347b`–`SET 0x3482`, `SET 0x2012`, `SET 0x030c`, `SET 0x3335`–`SET 0x333d`,
+`SET 0x05f1`, `SET 0x3805`.

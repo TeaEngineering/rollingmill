@@ -91,8 +91,11 @@ KNOWN_WVALUES: dict = {
     0x3003: 'poll_speed',             # Pattern B; 1×uint32 current speed
     0x3800: 'poll_status_byte',       # Pattern B; 1 byte machine status
     0x3b01: 'poll_3b01',              # Pattern B; 4 bytes (timer sync, meaning TBD)
-    # ── Device / machine status ──────────────────────────────────────────────
-    0x3804: 'device_status',          # Pattern B; 6×uint32; word[0] bit2=busy
+    # -- Calibration
+    0x05f0: 'get_XYZ_axis_scaling',
+    0x05f1: 'set_XYZ_axis_scaling',
+    0x3804: 'get_rotary_axis_angle_correction',
+    0x3805: 'set_rotary_axis_angle_correction',
     # ── Spindle rotation time ────────────────────────────────────────────────
     0x2405: 'spindle_time_read',      # Pattern B; 16 bytes; uint32[0]=total seconds
     0x2425: 'spindle_time_reset',     # SET bare trigger; waits ping bit21

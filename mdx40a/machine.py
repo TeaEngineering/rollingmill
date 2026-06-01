@@ -172,6 +172,8 @@ class MDX40A:
         self._rotary_extension_byte: Optional[int] = None    # latest GET 0x3800 byte (0=none, 1=rotary, 2=rotary+vice)
         self._rotary_centerline: Optional[tuple] = None      # stored A-axis centreline (x_mm, y_mm, z_mm); read once at idle
         self._firmware_id: Optional[str] = None              # ASCII model/firmware string from GET 0x0101 (read at handshake)
+        self._axis_scaling_pct: Optional[tuple] = None       # (X%, Y%, Z%, A%) from GET 0x5f0; static, read at handshake
+        self._rotary_angle_correction: Optional[tuple] = None  # (refX1, ofsY1, ofsZ1, refX2, ofsY2, ofsZ2) mm from GET 0x3804
 
     # ── Connection lifecycle ──────────────────────────────────────────────────
 
@@ -500,82 +502,151 @@ class MDX40A:
         """Total spindle rotation time in seconds, updated by the poll loop (~every 60 s)."""
         return self._spindle_secs
 
-    def get_device_status_0x3804(self) -> Optional[tuple]:
-        """Read the 6-uint32 unknown values (RE: get_6uint32_0x3804 @ 0x0041ad10).
+    # ── Machine calibration (Setup → Correction tab) ──────────────────────────
+    # See docs/machine-calibration.md for full encoding and wire layout.
 
-        VPanel stores the result at this+0x8c..0xa0 and uses it in two ways:
-          - FUN_00403e90: word[0] bit 2 (0x4) gates jog commands (suppresses if set)
-          - FUN_004042e0: same bit is the motion-complete wait exit condition
-
-        Returns tuple of 6 LE uint32s, or None on error/timeout.
-        GET 0x3804: (50000, 0, 0, 250000, 0, 0)
+    @property
+    def axis_scaling_pct(self) -> Optional[tuple]:
+        """Per-axis distance scaling (X%, Y%, Z%, A%) from GET 0x5f0.
+        Calibration value, read once at handshake. None before that completes.
         """
-        try:
-            data = _usb.trigger_read_b(self._dev, 0x3804, 24)
-            if data is None or len(data) < 24:
-                log.warning("get_device_status_0x3804: short/no response (%s)",
-                            None if data is None else len(data))
-                return None
-            vals = struct.unpack_from('>6I', bytes(data))
-            busy = bool(vals[0] & 0x04)
-            log.info(f"GET 0x3804: {vals}")
-            return vals
-        except usb.core.USBError as e:
-            log.warning("get_device_status_0x3804 failed: %s", e)
-            return None
+        return self._axis_scaling_pct
 
-    def fetch_axis_snapshot(self) -> None:
-        """Reproduce VPanel's pre-cut-job axis snapshot for diagnostics.
-        My guess is that this is scaled XYZA position, ie. after applying
-        G50/G51 scaling and perhaps workspace transformations. TBD.
-
-        RE: unknown_config_reads @ 0x004017d0 — reads trigger 0x5f0 (8×uint32
-        = 4 numerator/denominator pairs, XYZA) and trigger 0x3804 (6×uint32),
-        then applies the same float scaling VPanel writes onto its dialog
-        struct. Raw and scaled values are emitted to the log; nothing is
-        cached on self.
-
-        Scaling constants from VP_MDX40A.exe:
-          DOUBLE_0043e9e8 = 100.0      (final ×100 in unknown_config_reads)
-          DOUBLE_004413c8 = 0.000001   (per-axis (5 - trunc(ratio))/10 * k)
+    @property
+    def rotary_angle_correction(self) -> Optional[tuple]:
+        """Rotary A-axis angle correction (refX1, ofsY1, ofsZ1, refX2, ofsY2, ofsZ2) in mm.
+        Calibration value, read once at handshake. None before that completes.
         """
-        SCALE_E9E8  = 100.0
-        SCALE_413C8 = 0.000001
+        return self._rotary_angle_correction
 
-        # 0x5f0: 8 × uint32 BE = 4 numerators + 4 denominators (X, Y, Z, A)
+    def get_XYZ_axis_scaling(self) -> Optional[tuple]:
+        """Read per-axis distance scaling from firmware (Pattern B, GET 0x5f0).
+
+        RE: get_XYZ_axis_scaling_values_0x5f0 @ 0x00419f60. Wire format is
+        8 × uint32 BE — 4 numerators followed by 4 denominators, axis order
+        X, Y, Z, A. Effective scale = numerator / denominator; multiply by 100
+        for the percentage shown in the Setup → Correction dialog.
+
+        Returns (X%, Y%, Z%, A%) tuple, or None on USB / short response.
+        """
         try:
             data = _usb.trigger_read_b(self._dev, 0x5f0, 32)
             if data is None or len(data) < 32:
-                log.warning("fetch_axis_snapshot 0x5f0: short/no response (%s)",
-                            None if data is None else len(data))
-            else:
-                nums   = struct.unpack_from('>4I', bytes(data), 0)
-                denoms = struct.unpack_from('>4I', bytes(data), 16)
-                log.info("0x5f0 raw      nums=%s  denoms=%s", nums, denoms)
-                scaled = []
-                for n, d in zip(nums, denoms):
-                    ratio = (n / d) if d else 0.0
-                    # (double)((5 - (int)ratio) / 10) * 0.000001
-                    stage = int((5 - int(ratio)) / 10) * SCALE_413C8
-                    # then *= 100.0 in unknown_config_reads
-                    scaled.append(stage * SCALE_E9E8)
-                log.info("0x5f0 stored   XYZA=%s", scaled)
+                log.warning("get_XYZ_axis_scaling: short/no response")
+                return None
+            nums   = struct.unpack_from('>4I', bytes(data), 0)
+            denoms = struct.unpack_from('>4I', bytes(data), 16)
+            log.debug("GET 0x5f0 raw nums=%s denoms=%s", nums, denoms)
+            pct = tuple(
+                (n / d) * 100.0 if d else 0.0
+                for n, d in zip(nums, denoms)
+            )
+            self._axis_scaling_pct = pct
+            log.info("Axis scaling: X=%.3f%% Y=%.3f%% Z=%.3f%% A=%.3f%%", *pct)
+            return pct
         except usb.core.USBError as e:
-            log.warning("fetch_axis_snapshot 0x5f0 failed: %s", e)
+            log.warning("get_XYZ_axis_scaling failed: %s", e)
+            return None
 
-        # 0x3804: 6 × uint32 BE — stored at field101_0x8c..field109_0xa0
+    def get_rotary_axis_angle_correction(self) -> Optional[tuple]:
+        """Read rotary A-axis two-point angle correction (Pattern B, GET 0x3804).
+
+        RE: get_rotary_axis_angle_correction_0x3804 @ 0x0041ad10. Wire format
+        is 6 × signed int32 BE in 1/1000 mm:
+        (refX1, ofsY1, ofsZ1, refX2, ofsY2, ofsZ2). Firmware interpolates the
+        Y/Z offsets between the two X reference points.
+
+        Returns the 6-tuple in mm, or None on USB / short response.
+        """
         try:
             data = _usb.trigger_read_b(self._dev, 0x3804, 24)
             if data is None or len(data) < 24:
-                log.warning("fetch_axis_snapshot 0x3804: short/no response (%s)",
-                            None if data is None else len(data))
-            else:
-                vals = struct.unpack_from('>6I', bytes(data))
-                log.info("0x3804 raw     %s", vals)
-                log.info("0x3804 stored  f101=%d X=%d Y=%d Z=%d A=%d f109=%d",
-                         *vals)
+                log.warning("get_rotary_axis_angle_correction: short/no response")
+                return None
+            vals = struct.unpack_from('>6i', bytes(data))
+            log.debug("GET 0x3804 raw %s", vals)
+            mm = tuple(v / 1000.0 for v in vals)
+            self._rotary_angle_correction = mm
+            log.info(
+                "Rotary angle correction: P1(X=%.3f Y=%.3f Z=%.3f) P2(X=%.3f Y=%.3f Z=%.3f) mm",
+                *mm,
+            )
+            return mm
         except usb.core.USBError as e:
-            log.warning("fetch_axis_snapshot 0x3804 failed: %s", e)
+            log.warning("get_rotary_axis_angle_correction failed: %s", e)
+            return None
+
+    ## TODO untested
+    def set_XYZ_axis_scaling(
+        self,
+        x_pct: float, y_pct: float, z_pct: float, a_pct: float,
+    ) -> bool:
+        """Write per-axis distance scaling (SET 0x5f1).
+
+        RE: set_XYZ_axis_scaling_values_0x5f1 @ 0x0041a110. Payload is 8 × uint32
+        BE — 4 numerators followed by 4 denominators. VPanel always sends
+        denominators of 1,000,000, so numerator = round(percent × 10000).
+        Polls ping bit 21 clear after — returns True on firmware ack.
+        """
+        SCALE = 10000        # percent × 10000 → numerator with fixed denom 1e6
+        DENOM = 1_000_000
+        nums = (
+            round(x_pct * SCALE),
+            round(y_pct * SCALE),
+            round(z_pct * SCALE),
+            round(a_pct * SCALE),
+        )
+        payload = struct.pack('>8I', *nums, DENOM, DENOM, DENOM, DENOM)
+        try:
+            _usb.vend_set(self._dev, 0x5f1, payload)
+            log.info("Axis scaling write: X=%.3f%% Y=%.3f%% Z=%.3f%% A=%.3f%%",
+                     x_pct, y_pct, z_pct, a_pct)
+        except usb.core.USBError as e:
+            log.warning("set_XYZ_axis_scaling failed: %s", e)
+            return False
+        ok = self._wait_ping_bit21()
+        if ok:
+            self._axis_scaling_pct = (x_pct, y_pct, z_pct, a_pct)
+        return ok
+
+    ## TODO untested
+    def set_rotary_axis_angle_correction(
+        self,
+        refX1_mm: float, ofsY1_mm: float, ofsZ1_mm: float,
+        refX2_mm: float, ofsY2_mm: float, ofsZ2_mm: float,
+    ) -> bool:
+        """Write rotary A-axis two-point angle correction (SET 0x3805).
+
+        RE: set_rotary_axis_angle_correction_0x3805 @ 0x0041ad70. Payload is
+        6 × signed int32 BE in 1/1000 mm. The firmware expects the lower-X
+        point first; this routine swaps the two triples when refX1 > refX2,
+        mirroring `settings_write_axis_scaling_and_rotary_offsets`.
+        Polls ping bit 21 clear after — returns True on firmware ack.
+        """
+        if refX1_mm > refX2_mm:
+            refX1_mm, refX2_mm = refX2_mm, refX1_mm
+            ofsY1_mm, ofsY2_mm = ofsY2_mm, ofsY1_mm
+            ofsZ1_mm, ofsZ2_mm = ofsZ2_mm, ofsZ1_mm
+        payload = struct.pack(
+            '>6i',
+            round(refX1_mm * 1000), round(ofsY1_mm * 1000), round(ofsZ1_mm * 1000),
+            round(refX2_mm * 1000), round(ofsY2_mm * 1000), round(ofsZ2_mm * 1000),
+        )
+        try:
+            _usb.vend_set(self._dev, 0x3805, payload)
+            log.info(
+                "Rotary angle correction write: P1(X=%.3f Y=%.3f Z=%.3f) P2(X=%.3f Y=%.3f Z=%.3f) mm",
+                refX1_mm, ofsY1_mm, ofsZ1_mm, refX2_mm, ofsY2_mm, ofsZ2_mm,
+            )
+        except usb.core.USBError as e:
+            log.warning("set_rotary_axis_angle_correction failed: %s", e)
+            return False
+        ok = self._wait_ping_bit21()
+        if ok:
+            self._rotary_angle_correction = (
+                refX1_mm, ofsY1_mm, ofsZ1_mm, refX2_mm, ofsY2_mm, ofsZ2_mm,
+            )
+        return ok
 
     def _wait_ping_bit21(self, timeout: float = 3.0) -> bool:
         """Poll GET 0x0001 until bit 21 (_PING_BIT21) clears — firmware command ack.
@@ -993,8 +1064,11 @@ class MDX40A:
             self._firmware_id = fw
             log.info("Firmware ID: %s", fw)
 
-        # Read initial 0x3804 device status (6×uint32 busy/status block)
-        self.get_device_status_0x3804()
+        # Read calibration (Setup → Correction tab values): per-axis scaling
+        # and rotary two-point angle correction. Static at runtime — cached
+        # on self for the lifetime of the connection.
+        self.get_XYZ_axis_scaling()
+        self.get_rotary_axis_angle_correction()
 
         # Read configured spindle target RPM (GET 0x3900, Pattern B)
         rpm = self.get_spindle_rpm()
