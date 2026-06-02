@@ -808,18 +808,45 @@ class MDX40A:
             return False
         return self._wait_ping_bit21()
 
+    def read_position(self) -> Optional[tuple]:
+        """Read live machine XYZA position (Pattern B, GET 0x0301).
+
+        RE: mdx_read_pos_0x301 @ 0x00419be0 — dev_trigger_read_uint32s(0x301, buf, 4).
+        Returns (x_mm, y_mm, z_mm, a_deg) signed int32 BE in 1/1000 mm-or-deg, or
+        None on USB / short response. Distinct from the cached `state.x_mm` etc.,
+        which are sampled at the 200 ms poll cadence — this is a fresh read.
+        """
+        try:
+            data = self.pattern_b_read(0x0301, 16)
+            if data is None or len(data) < 16:
+                log.warning("read_position: short/no response")
+                return None
+            x, y, z, a = struct.unpack_from('>4i', bytes(data))
+            return (x / 1000.0, y / 1000.0, z / 1000.0, a / 1000.0)
+        except (usb.core.USBError, ValueError) as e:
+            log.warning("read_position failed: %s", e)
+            return None
+
     def partial_update_wcs_origin(self, slot: int, axis: str) -> bool:
         """Overwrite one axis of a stored WCS origin with the live machine position.
 
-        RE: partial_update_coord_sys @ 0x00403a40 — re-reads the slot's stored
-        origin, patches the chosen axis from the caller-supplied destination,
-        then writes the result back via send_origin_to_coord. The target slot
-        does not need to be the active WCS.
+        RE: set_origin_point_1partial_button @ 0x00415de0 — reads the live machine
+        position via Pattern B GET 0x0301 (NOT the cached 200 ms poll state),
+        normalises A to [0°, 360°) snapped to 10 mdeg, then calls
+        partial_update_coord_sys @ 0x00403a40 which re-reads the stored WCS
+        origin, patches the chosen axis, and writes the result back via
+        set_coord_origin_to. The target slot does not need to be the active WCS.
         """
         if not 1 <= slot <= 10:
             raise ValueError(f"WCS slot must be 1–10, got {slot}")
         if axis not in ('X', 'Y', 'Z', 'A'):
             raise ValueError(f"axis must be X/Y/Z/A, got {axis!r}")
+
+        live = self.read_position()
+        if live is None:
+            log.warning("partial_update_wcs_origin(%s, %s): live position read failed",
+                        wcs_label(slot), axis)
+            return False
 
         origin = self.get_wcs_origin(slot)
         if origin is None:
@@ -828,15 +855,19 @@ class MDX40A:
             return False
 
         x, y, z, a = origin
-        s = self._state
+        lx, ly, lz, la = live
         if axis == 'X':
-            x = s.x_mm
+            x = lx
         elif axis == 'Y':
-            y = s.y_mm
+            y = ly
         elif axis == 'Z':
-            z = s.z_mm
+            z = lz
         else:
-            a = s.a_deg
+            # Normalise A: snap to 10 mdeg, fold into [0°, 360°).
+            # Mirrors set_origin_point_1partial_button: MulDiv(nA,1,10)*10 % 360000.
+            a_mdeg = (round(la * 1000) // 10) * 10
+            a_mdeg %= 360_000
+            a = a_mdeg / 1000.0
 
         return self.write_wcs_origin(slot, x, y, z, a)
 
