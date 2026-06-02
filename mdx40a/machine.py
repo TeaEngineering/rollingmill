@@ -16,7 +16,7 @@ from typing import Optional
 
 import usb.core
 
-from . import usb as _usb
+from .usb import MdxLink
 
 log = logging.getLogger(__name__)
 
@@ -154,16 +154,14 @@ class MDX40A:
 
     Usage::
 
-        machine = MDX40A()
-        machine.connect()
-        machine.poll()            # refresh state and ping caches
-        machine.send_jog('Z', -2.0)   # move 2 mm down (fire-and-forget)
-        machine.release()
+        with MdxUSB.discover(mock=False) as link:
+            m = MDX40A(link)          # constructor runs the MDX-side handshake
+            m.poll()                  # refresh state and ping caches
+            m.send_jog('Z', -2.0)     # move 2 mm down (fire-and-forget)
     """
 
-    def __init__(self):
-        self._dev = None
-        self._intf_num: Optional[int] = None
+    def __init__(self, link: MdxLink):
+        self._link = link
         self._state = MachineState()
         self._last_ping_word: Optional[int] = None   # most recent GET 0x0001 (uint32 LE); see is_busy
         self._spindle_last_read_at: float = 0.0
@@ -180,38 +178,7 @@ class MDX40A:
         self._firmware_id: Optional[str] = None              # ASCII model/firmware string from GET 0x0101 (read at handshake)
         self._axis_scaling_pct: Optional[tuple] = None       # (X%, Y%, Z%, A%) from GET 0x5f0; static, read at handshake
         self._rotary_angle_correction: Optional[tuple] = None  # (refX1, ofsY1, ofsZ1, refX2, ofsY2, ofsZ2) mm from GET 0x3804
-
-    # ── Connection lifecycle ──────────────────────────────────────────────────
-
-    def connect(self) -> None:
-        """Find and open the MDX-40A.  Raises RuntimeError if not found."""
-        dev = _usb.find_device()
-        if dev is None:
-            raise RuntimeError(
-                "MDX-40A not found (VID=0x0B75 PID=0x03DB). Is it powered on?"
-            )
-        log.info(
-            "Found %r %r  bus=%d addr=%d serial=%r",
-            dev.manufacturer, dev.product, dev.bus, dev.address, dev.serial_number,
-        )
-        self._dev = dev
-        self._intf_num = _usb.claim(dev)
-        log.debug("Claimed interface %d", self._intf_num)
-        self._handshake()
-
-    def release(self) -> None:
-        """Release the USB interface."""
-        if self._dev is not None and self._intf_num is not None:
-            _usb.release(self._dev, self._intf_num)
-            log.info("Interface %d released", self._intf_num)
-        self._dev = None
-
-    def __enter__(self):
-        self.connect()
-        return self
-
-    def __exit__(self, *_):
-        self.release()
+        self._mdx_handshake()
 
     # ── State access ─────────────────────────────────────────────────────────
 
@@ -284,7 +251,7 @@ class MDX40A:
         """
         payload = b'\x00' if active else b'\xff'
         try:
-            _usb.vend_set(self._dev, 0x1109, payload)
+            self._link.vend_set(0x1109, payload)
             log.debug("Operation mode: %s", "begin (0x00)" if active else "end (0xff)")
         except usb.core.USBError as e:
             log.warning("SET 0x1109 failed: %s", e)
@@ -297,7 +264,7 @@ class MDX40A:
         is the absolute-position form used only in multi-step milling sequences).
         """
         payload = struct.pack('>HH4i', speed, 0x0000, x, y, z, a)
-        _usb.vend_set(self._dev, 0x04f5, payload)
+        self._link.vend_set(0x04f5, payload)
         log.debug("Jog cmd sent: %s", payload.hex())
 
     def _ping_status(self) -> Optional[int]:
@@ -318,7 +285,7 @@ class MDX40A:
         or None on USB error / short response.
         """
         try:
-            data = _usb.vend_get(self._dev, 0x0001, 4)
+            data = self._link.vend_get(0x0001, 4)
             if len(data) < 4:
                 return None
             word = struct.unpack_from('<I', data)[0]
@@ -357,10 +324,36 @@ class MDX40A:
         p = self._ping_status()
         return p is not None and (p & _PING_ERROR_MASK) != 0
 
+    def pattern_b_read(
+        self, wValue: int, max_length: int,
+        poll_timeout: float = 1.0,
+    ) -> bytes:
+        """Pattern B read (RE: dev_trigger_read @ 0x0041bb90).
+
+        SET wValue → poll GET 0x0001 until ping[3] (C LE *uint32 >> 24) is
+        non-zero (= firmware-reported response length) → GET 0x0003 of that
+        many bytes.
+
+        Raises ValueError on device-error bit or read timeout.
+        """
+        link = self._link
+        link.vend_set(wValue, b"")
+        deadline = time.monotonic() + poll_timeout
+        while time.monotonic() < deadline:
+            ping = link.vend_get(0x0001, 4)
+            if len(ping) >= 4:
+                if ping[2] & 0x10:   # bit 20 = device error
+                    raise ValueError("Machine has device error bit set")
+                length = min(ping[3], max_length)
+                if length:
+                    return link.vend_get(0x0003, length)
+            time.sleep(0.005)
+        raise ValueError("Read poll_timeout")
+
     def stop_motion(self) -> None:
         """Send immediate motion stop (SET wValue=0x03f3)."""
         try:
-            _usb.vend_set(self._dev, 0x03f3)
+            self._link.vend_set(0x03f3)
             log.info("Motion stop sent (SET 0x03f3)")
         except usb.core.USBError as e:
             log.warning("Motion stop failed: %s", e)
@@ -400,7 +393,7 @@ class MDX40A:
         Returns RPM as uint32 (big-endian from device), or None on error.
         """
         try:
-            data = _usb.trigger_read_b(self._dev, 0x3900, 4)
+            data = self.pattern_b_read(0x3900, 4)
             if data is None or len(data) < 4:
                 log.warning("get_spindle_rpm: short/no response")
                 return None
@@ -435,7 +428,7 @@ class MDX40A:
         rpm = max(SPINDLE_RPM_MIN, min(SPINDLE_RPM_MAX, int(rpm)))
         self._spindle_target_rpm = rpm   # optimistic update before USB
         try:
-            _usb.vend_set(self._dev, 0x3006, struct.pack('>I', rpm))
+            self._link.vend_set(0x3006, struct.pack('>I', rpm))
             log.info("Spindle spindle on RPM %d", rpm)
             self._wait_ping_bit21()
         except usb.core.USBError as e:
@@ -444,7 +437,7 @@ class MDX40A:
     def spindle_off(self) -> None:
         """Stop spindle motor off."""
         try:
-            _usb.vend_set(self._dev, 0x3006, struct.pack('>I', 0))
+            self._link.vend_set(0x3006, struct.pack('>I', 0))
             log.info("Spindle off")
         except usb.core.USBError as e:
             log.warning("spindle_off failed: %s", e)
@@ -459,7 +452,7 @@ class MDX40A:
         """
         payload = struct.pack('<HH', 1, 0xFFFF) if enabled else struct.pack('<HH', 0, 0)
         try:
-            _usb.vend_set(self._dev, 0x3809, payload)
+            self._link.vend_set(0x3809, payload)
             log.info("Rotary drilling %s", "ON" if enabled else "OFF")
         except usb.core.USBError as e:
             log.warning("rotary_drill_mode failed: %s", e)
@@ -469,7 +462,7 @@ class MDX40A:
         pct = max(10, min(200, int(pct)))
         self._spindle_speed_pct = pct
         try:
-            _usb.vend_set(self._dev, 0x3008, bytes([pct]))
+            self._link.vend_set(0x3008, bytes([pct]))
             log.info("Spindle speed set to %d%%", pct)
         except usb.core.USBError as e:
             log.warning("set_spindle_speed failed: %s", e)
@@ -491,7 +484,7 @@ class MDX40A:
         pct = max(10, min(200, int(pct)))
         self._cutting_feed_pct = pct
         try:
-            _usb.vend_set(self._dev, 0x0307, bytes([pct]))
+            self._link.vend_set(0x0307, bytes([pct]))
             log.info("Cutting feed rate set to %d%%", pct)
         except usb.core.USBError as e:
             log.warning("set_cutting_feed failed: %s", e)
@@ -506,7 +499,7 @@ class MDX40A:
         GET 0x2405 data (58124, 58124, 0, 0, 0)
         """
         try:
-            data = _usb.trigger_read_b(self._dev, 0x2405, 16)
+            data = self.pattern_b_read(0x2405, 16)
             if data is None or len(data) < 16:
                 return None
             vals = struct.unpack('>IIHHHxx', data)
@@ -551,7 +544,7 @@ class MDX40A:
         Returns (X%, Y%, Z%, A%) tuple, or None on USB / short response.
         """
         try:
-            data = _usb.trigger_read_b(self._dev, 0x5f0, 32)
+            data = self.pattern_b_read(0x5f0, 32)
             if data is None or len(data) < 32:
                 log.warning("get_XYZ_axis_scaling: short/no response")
                 return None
@@ -580,7 +573,7 @@ class MDX40A:
         Returns the 6-tuple in mm, or None on USB / short response.
         """
         try:
-            data = _usb.trigger_read_b(self._dev, 0x3804, 24)
+            data = self.pattern_b_read(0x3804, 24)
             if data is None or len(data) < 24:
                 log.warning("get_rotary_axis_angle_correction: short/no response")
                 return None
@@ -619,7 +612,7 @@ class MDX40A:
         )
         payload = struct.pack('>8I', *nums, DENOM, DENOM, DENOM, DENOM)
         try:
-            _usb.vend_set(self._dev, 0x5f1, payload)
+            self._link.vend_set(0x5f1, payload)
             log.info("Axis scaling write: X=%.3f%% Y=%.3f%% Z=%.3f%% A=%.3f%%",
                      x_pct, y_pct, z_pct, a_pct)
         except usb.core.USBError as e:
@@ -654,7 +647,7 @@ class MDX40A:
             round(refX2_mm * 1000), round(ofsY2_mm * 1000), round(ofsZ2_mm * 1000),
         )
         try:
-            _usb.vend_set(self._dev, 0x3805, payload)
+            self._link.vend_set(0x3805, payload)
             log.info(
                 "Rotary angle correction write: P1(X=%.3f Y=%.3f Z=%.3f) P2(X=%.3f Y=%.3f Z=%.3f) mm",
                 refX1_mm, ofsY1_mm, ofsZ1_mm, refX2_mm, ofsY2_mm, ofsZ2_mm,
@@ -699,7 +692,7 @@ class MDX40A:
         Returns True if acknowledged within timeout.
         """
         try:
-            _usb.vend_set(self._dev, 0x2425)
+            self._link.vend_set(0x2425)
             log.info("Spindle time reset sent (SET 0x2425)")
         except usb.core.USBError as e:
             log.warning("reset_spindle_time failed: %s", e)
@@ -736,7 +729,7 @@ class MDX40A:
             raise ValueError(f"WCS slot must be 1–10, got {slot}")
         wv = _WCS_READ_WVAL[slot - 1]
         try:
-            data = _usb.trigger_read_b(self._dev, wv, 16)
+            data = self.pattern_b_read(wv, 16)
             if data is None or len(data) < 16:
                 log.warning("get_wcs_origin(%d): short/no response", slot)
                 return None
@@ -787,7 +780,7 @@ class MDX40A:
             round(z_mm * 1000), round(a_deg * 1000),
         )
         try:
-            _usb.vend_set(self._dev, wv, payload)
+            self._link.vend_set(wv, payload)
             log.info("WCS%d origin written: (%.3f, %.3f, %.3f, %.3f°)",
                      slot, x_mm, y_mm, z_mm, a_deg)
             if slot == self._active_wcs:
@@ -839,7 +832,7 @@ class MDX40A:
         results = []
         for i, wv in enumerate(_TOOL_OFFSET_READ_WVAL, 1):
             try:
-                data = _usb.trigger_read_b(self._dev, wv, 4)
+                data = self.pattern_b_read(wv, 4)
                 if data is None or len(data) < 4:
                     log.warning("get_tool_offset(%d): short/no response", i)
                     results.append(None)
@@ -862,7 +855,7 @@ class MDX40A:
         wv = _TOOL_OFFSET_WRITE_WVAL[slot - 1]
         raw = max(0, round(value_mm * 1000))
         try:
-            _usb.vend_set(self._dev, wv, struct.pack('>I', raw))
+            self._link.vend_set(wv, struct.pack('>I', raw))
             log.info("Tool offset T%d → %.3f mm (raw %d)", slot, value_mm, raw)
         except usb.core.USBError as e:
             log.warning("set_tool_offset(%d) failed: %s", slot, e)
@@ -906,7 +899,7 @@ class MDX40A:
         result stored as a null-terminated ASCII CString.
         """
         try:
-            data = _usb.trigger_read_b(self._dev, 0x0101, 256)
+            data = self.pattern_b_read(0x0101, 256)
             if data is None or not len(data):
                 log.warning("get_firmware_id: no response")
                 return None
@@ -930,7 +923,7 @@ class MDX40A:
         Internal helper; pair with SET 0x3107 (send_axis_config) to write back.
         """
         try:
-            data = _usb.trigger_read_b(self._dev, 0x3106, 6)
+            data = self.pattern_b_read(0x3106, 6)
             if data is None or len(data) < 6:
                 log.warning("_query_axis_config: short/no response (%s)",
                             None if data is None else len(data))
@@ -983,7 +976,7 @@ class MDX40A:
             return True
         new_cfg = bytes([cfg[0], mode]) + cfg[2:6]
         try:
-            _usb.vend_set(self._dev, 0x3107, new_cfg)
+            self._link.vend_set(0x3107, new_cfg)
             log.info("set_command_set: SET 0x3107  %s → %s", cfg.hex(), new_cfg.hex())
         except usb.core.USBError as e:
             log.warning("set_command_set: SET 0x3107 failed: %s", e)
@@ -997,7 +990,7 @@ class MDX40A:
         Returns (x_mm, y_mm, z_mm) signed int32 BE in 1/1000 mm, or None on error.
         """
         try:
-            data = _usb.trigger_read_b(self._dev, 0x3801, 12)
+            data = self.pattern_b_read(0x3801, 12)
             if data is None or len(data) < 12:
                 log.warning("get_rotary_axis_centreline: short/no response")
                 return None
@@ -1025,10 +1018,10 @@ class MDX40A:
             round(z_mm * 1000), round(a_deg * 1000),
         )
         try:
-            _usb.vend_set(self._dev, 0x1109, b'\x00')
-            _usb.vend_set(self._dev, 0x04f7, payload)
-            _usb.vend_set(self._dev, 0x3f2)
-            _usb.vend_set(self._dev, 0x1109, b'\xff')
+            self._link.vend_set(0x1109, b'\x00')
+            self._link.vend_set(0x04f7, payload)
+            self._link.vend_set(0x3f2)
+            self._link.vend_set(0x1109, b'\xff')
             log.info("Move to machine (%.3f, %.3f, %.3f, %.3f°) speed=%d",
                      x_mm, y_mm, z_mm, a_deg, speed)
         except usb.core.USBError as e:
@@ -1041,9 +1034,9 @@ class MDX40A:
     def _send_bracketed(self, wValue: int, payload: bytes, log_msg: str) -> None:
         """Send a single SET wrapped in the 0x1109 operation bracket."""
         try:
-            _usb.vend_set(self._dev, 0x1109, b'\x00')
-            _usb.vend_set(self._dev, wValue, payload)
-            _usb.vend_set(self._dev, 0x1109, b'\xff')
+            self._link.vend_set(0x1109, b'\x00')
+            self._link.vend_set(wValue, payload)
+            self._link.vend_set(0x1109, b'\xff')
             log.info(log_msg)
         except usb.core.USBError as e:
             log.warning("SET 0x%04x failed: %s", wValue, e)
@@ -1100,47 +1093,32 @@ class MDX40A:
 
     _SPINDLE_POLL_INTERVAL = 60.0  # seconds between get_spindle_time() refreshes (wall-clock, not call count)
 
-    def _handshake(self) -> None:
-        """Perform the VPanel startup sequence."""
-        dev = self._dev
+    def _mdx_handshake(self) -> None:
+        """Perform the MDX-side handshake — everything after the USB
+        printer-class GET_DEVICE_ID / SOFT_RESET (which MdxUSB.discover did).
 
-        # USB printer class GET_DEVICE_ID (bmRequestType=0xA1, bRequest=0x00).
-        # On Windows, USBPRINT.SYS sends this automatically during device
-        # enumeration — before VPanel ever opens the handle. On macOS with
-        # libusb it is never sent.
-        try:
-            data = dev.ctrl_transfer(0xA1, 0x00, 0x0000, self._intf_num, 1024, timeout=2000)
-            log.info("GET_DEVICE_ID (%d bytes): %s",
-                     len(data), bytes(data[:64]).decode('ascii', errors='replace'))
-        except usb.core.USBError as e:
-            log.debug("GET_DEVICE_ID not supported or failed: %s", e)
-
-        # USB printer class SOFT_RESET (bmRequestType=0x21, bRequest=0x02).
-        # USBPRINT may send this when first opening the port.
-        try:
-            dev.ctrl_transfer(0x21, 0x02, 0x0000, self._intf_num, 0, timeout=2000)
-            log.info("SOFT_RESET sent")
-        except usb.core.USBError as e:
-            log.debug("SOFT_RESET not supported or failed: %s", e)
-
+        Mirrors VPanel's startup sequence from `endian_detect` onward.
+        Called from __init__; the link is assumed to be claimed and ready.
+        """
         # Ping
         self._ping_status()
 
         # Endian detection, 4 byte read should be 0x1234
         try:
-            data = _usb.vend_get(dev, 0x0002, 4)
-            _,_,sig = struct.unpack(">BBH", data)
+            data = self._link.vend_get(0x0002, 4)
+            _, _, sig = struct.unpack(">BBH", data)
             if sig == 0x1234:
                 log.info("Machine endian confirmed (sig=0x1234)")
             else:
-                print("Unexpected machine endian sig=0x%04X (want 0x1234)", sig)
-                exit(-1)
+                raise RuntimeError(
+                    f"Unexpected machine endian sig=0x{sig:04X} (want 0x1234)"
+                )
         except usb.core.USBError as e:
             log.warning("Machine type check failed: %s", e)
 
         # Keepalive — VPanel sends 1 byte payload (poll_keepalive @ 0041c3d0)
         try:
-            _usb.vend_set(dev, 0x03f5, b'\x00')
+            self._link.vend_set(0x03f5, b'\x00')
             log.debug("Keepalive sent")
         except usb.core.USBError as e:
             log.warning("Keepalive failed: %s", e)
@@ -1180,10 +1158,10 @@ class MDX40A:
         register at 0x0001 (motion-busy / command-ack / response-length).
         """
         try:
-            _usb.vend_set(self._dev, 0x03f5, b'\x00')
+            self._link.vend_set(0x03f5, b'\x00')
             for wv, n in ((0x3005, 8), (0x3800, 1), (0x3003, 4), (0x3b01, 4)):
                 try:
-                    raw = _usb.trigger_read(self._dev, wv, n)
+                    raw = self.pattern_b_read(wv, n)
                     if raw is not None and len(raw):
                         if wv == 0x3800:
                             self._rotary_extension_byte = raw[0]
@@ -1198,7 +1176,7 @@ class MDX40A:
                 except usb.core.USBError as e:
                     log.debug("Poll read 0x%04x failed: %s", wv, e)
 
-            data = _usb.vend_get(self._dev, 0x0100, 32)
+            data = self._link.vend_get(0x0100, 32)
             if len(data) < 20:
                 log.debug("Short state response (%d bytes)", len(data))
                 return None
@@ -1230,7 +1208,7 @@ class MDX40A:
     def bulk_write(self, data: bytes) -> int:
         log.info(f"Sending bulk write {data}")
         """Pass through raw bytes to the bulk-OUT endpoint (NC/RML command stream)."""
-        return _usb.bulk_write(self._dev, data)
+        return self._link.bulk_write(data)
 
     def get_nc_bytes_processed(self) -> int:
         """Read NC bytes-processed counter — direct vendor-IN GET at wValue=0x0200,
@@ -1244,7 +1222,7 @@ class MDX40A:
         Returns unsigned 32-bit counter, or -1 on USB error / short read.
         """
         try:
-            data = _usb.vend_get(self._dev, 0x0200, 4)
+            data = self._link.vend_get(0x0200, 4)
             if len(data) >= 4:
                 return struct.unpack_from('>I', data, 0)[0]
         except usb.core.USBError as e:

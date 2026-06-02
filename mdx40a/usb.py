@@ -1,198 +1,234 @@
 """
 Raw USB transport layer for Roland MDX-40A.
 
-No MDX semantics here — just the four primitives the protocol needs.
-All functions raise usb.core.USBError on failure.
+`MdxUSB` is the real-device link. Construct via `MdxUSB.discover()`, which:
+  1. Finds the MDX-40A USB device (VID=0x0B75, PID=0x03DB),
+  2. Detaches any kernel driver and claims interface 0,
+  3. Caches the bulk-OUT endpoint,
+  4. Issues the two USB printer-class steps (GET_DEVICE_ID, SOFT_RESET) —
+     these are the only handshake steps that need the interface number.
 
-Mock mode
----------
-Call set_mock() before find_device() to run without a physical device.
-Every read returns a zero-filled buffer of the requested length; writes
-are discarded.  find_device() returns a _MockDevice sentinel that satisfies
-all attribute accesses made by machine.py.
+`MdxMockUSB` is the in-process double. It implements the same `MdxLink`
+interface as `MdxUSB` but never touches real USB — methods short-circuit
+and (optionally) emit trace lines. Use it in unit tests and `--mock` UIs
+by constructing it directly: `MDX40A(MdxMockUSB())`.
+
+The remaining handshake (ping, endian check, keepalive, firmware-id read,
+calibration reads, spindle RPM read) is `MDX40A.__init__`'s responsibility.
 """
 
-import time
-from typing import Optional, Any
+import logging
+from typing import Any, Optional, Protocol
 
 import usb.core
 import usb.util
 
-from . import trace as _trace
-
-VID = 0x0B75
-PID = 0x03DB
-
-# bmRequestType values for vendor control transfers on EP0
-_T_SET = 0x40  # host→device, vendor, device recipient
-_T_GET = 0xC0  # device→host, vendor, device recipient
-_BREQUEST = 0x01
-_WINDEX = 0x0000
-
-# ── Mock mode ─────────────────────────────────────────────────────────────────
-
-_mock = False
+log = logging.getLogger(__name__)
 
 
-class _MockDevice:
-    """Returned by find_device() in mock mode.  Satisfies all accesses in machine.py."""
+# ── Link Protocol ────────────────────────────────────────────────────────────
 
-    manufacturer = "Roland DG"
-    product = "MDX-40A (mock)"
-    serial_number = "MOCK0000"
-    bus = 0
-    address = 0
-
-    def ctrl_transfer(self, bmRequestType: int, bRequest: int, *args: Any, timeout:int=0) -> int|bytearray:
-        # IN transfers (bit 7 set): return zeroed buffer of requested length.
-        if bmRequestType & 0x80:
-            length = args[2] if len(args) > 2 else 0
-            return bytearray(int(length))
-        return 0
-
-
-_MOCK_DEV = _MockDevice()
-
-
-def set_mock(enabled: bool = True) -> None:
-    """Enable or disable mock (no-USB) mode.  Call before find_device()."""
-    global _mock
-    _mock = enabled
-
-
-# ── Device lifecycle ──────────────────────────────────────────────────────────
-
-
-def find_device() -> Any:
-    """Return the first MDX-40A USB device found, or None."""
-    if _mock:
-        return _MOCK_DEV
-    return usb.core.find(idVendor=VID, idProduct=PID)
-
-
-def claim(dev: Any) -> int:
-    """Detach kernel driver if needed and claim interface 0."""
-    if _mock:
-        return 0
-    intf_num = dev[0][(0, 0)].bInterfaceNumber
-    try:
-        if dev.is_kernel_driver_active(intf_num):
-            dev.detach_kernel_driver(intf_num)
-    except usb.core.USBError:
-        pass
-    usb.util.claim_interface(dev, intf_num)
-    return int(intf_num)
-
-
-def release(dev: Any, intf_num: int) -> None:
-    """Release a previously claimed interface."""
-    if _mock:
-        return
-    try:
-        usb.util.release_interface(dev, intf_num)
-    except usb.core.USBError:
-        pass
-
-
-# ── Transfer primitives ───────────────────────────────────────────────────────
-
-
-def vend_set(dev: Any, wValue: int, data: bytes = b"", timeout:int =2000) -> None:
-    """Vendor control OUT (VEND_SET_CMD). data=b'' for a bare trigger.
-
-    RE: deviceioctl_write_short/long — RD25D driver always prepends a 4-byte
-    header to the USB data stage: [bRequest=0x01, wValue_hi, wValue_lo, 0x00].
-    For the long path (>= 3 bytes) the driver builds this from the 3-byte IOCTL
-    InBuffer + a padding byte; for the short path it is embedded in InBuffer
-    directly (nInBufferSize = nBytes + 4).  Either way the device sees:
-        [0x01, wValue_hi, wValue_lo, 0x00] + payload
-    Trace logging records the logical payload (without header).
+class MdxLink(Protocol):
+    """The interface that any USB transport must implement to be usable by
+    `MDX40A`. Implemented by `MdxUSB` (real device) and `MdxMockUSB` (test
+    double). Duck-typed; no runtime enforcement, but new methods on `MdxUSB`
+    must be mirrored on `MdxMockUSB` or unit tests will break.
     """
-    if _mock:
-        return None
-    t = _trace.get_active()
-    header = bytes([0x01, (wValue >> 8) & 0xFF, wValue & 0xFF, 0x00])
-    wire_data = header + data
-    try:
-        result = dev.ctrl_transfer(
-            _T_SET, _BREQUEST, wValue, _WINDEX, wire_data, timeout=timeout
+
+    def vend_set(self, wValue: int, data: bytes = b"") -> None: ...
+    def vend_get(self, wValue: int, length: int) -> bytes: ...
+    def bulk_write(self, data: bytes) -> int: ...
+
+    def release(self) -> None: ...
+    def __enter__(self) -> "MdxLink": ...
+    def __exit__(self, *exc: Any) -> None: ...
+
+
+# ── Real-device link ─────────────────────────────────────────────────────────
+
+class MdxUSB:
+    """Real-device USB link. Owns the libusb device handle, the claimed
+    interface number, and the cached bulk-OUT endpoint."""
+
+    VID = 0x0B75
+    PID = 0x03DB
+
+    # bmRequestType values for vendor control transfers on EP0
+    _T_SET = 0x40   # host→device, vendor, device recipient
+    _T_GET = 0xC0   # device→host, vendor, device recipient
+    _BREQUEST = 0x01
+    _WINDEX = 0x0000
+
+    def __init__(self, dev: Any, intf_num: int, ep_out: Any, timeout:int):
+        self._dev = dev
+        self._intf_num = intf_num
+        self._ep_out = ep_out
+        self._timeout = timeout
+
+    # ── Factory ──────────────────────────────────────────────────────────────
+
+    @classmethod
+    def discover(cls, timeout:int=2000) -> "MdxUSB":
+        """Find, open and initialise the MDX-40A USB link.
+
+        find_device → claim interface 0 → cache bulk-OUT EP → GET_DEVICE_ID →
+        SOFT_RESET. Raises RuntimeError if the device is not found or has no
+        bulk-OUT endpoint.
+        """
+        dev = usb.core.find(idVendor=cls.VID, idProduct=cls.PID)
+        if dev is None:
+            raise RuntimeError(
+                f"MDX-40A not found (VID=0x{cls.VID:04X} PID=0x{cls.PID:04X}). "
+                "Is it powered on?"
+            )
+
+        intf_num = dev[0][(0, 0)].bInterfaceNumber
+        try:
+            if dev.is_kernel_driver_active(intf_num):
+                dev.detach_kernel_driver(intf_num)
+        except usb.core.USBError:
+            pass
+        usb.util.claim_interface(dev, intf_num)
+        log.info(
+            "MDX-40A link bus=%d addr=%d serial=%r interface=%d",
+            dev.bus, dev.address, dev.serial_number, intf_num,
         )
-        if t:
-            t.log_set(wValue, data)
-        return None
-    except Exception as exc:
-        if t:
-            t.log_error("SET", wValue, exc)
-        raise
+
+        ep_out = _find_bulk_out(dev)
+        if ep_out is None:
+            usb.util.release_interface(dev, intf_num)
+            raise RuntimeError("No bulk-OUT endpoint found on MDX-40A")
+
+        link = cls(dev, intf_num, ep_out, timeout)
+        link._printer_class_handshake()
+        return link
+
+    def _printer_class_handshake(self) -> None:
+        """The two USB printer-class steps that use the interface number.
+
+        On Windows USBPRINT.SYS issues these during device enumeration;
+        on macOS/Linux with libusb they must be sent explicitly. Failure
+        is non-fatal — some firmware revisions don't implement them.
+        """
+        # GET_DEVICE_ID (bmRequestType=0xA1, bRequest=0x00)
+        try:
+            data = self._dev.ctrl_transfer(
+                0xA1, 0x00, 0x0000, self._intf_num, 1024, timeout=2000,
+            )
+            device_id = bytes(data).decode('ascii', errors='replace')
+            log.info("GET_DEVICE_ID: %s", device_id)
+        except usb.core.USBError:
+            pass
+
+        # SOFT_RESET (bmRequestType=0x21, bRequest=0x02)
+        try:
+            self._dev.ctrl_transfer(
+                0x21, 0x02, 0x0000, self._intf_num, 0, timeout=2000,
+            )
+        except usb.core.USBError:
+            pass
+
+    # ── Lifecycle ────────────────────────────────────────────────────────────
+
+    def release(self) -> None:
+        """Release the claimed interface. Safe to call multiple times."""
+        if self._dev is None:
+            return
+        try:
+            usb.util.release_interface(self._dev, self._intf_num)
+        except usb.core.USBError:
+            pass
+        self._dev = None
+
+    def __enter__(self) -> "MdxUSB":
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        self.release()
+
+    # ── Transfer primitives ──────────────────────────────────────────────────
+
+    def vend_set(self, wValue: int, data: bytes = b"") -> None:
+        """Vendor control OUT (VEND_SET_CMD). data=b'' for a bare trigger.
+
+        RE: deviceioctl_write_short/long — RD25D driver always prepends a 4-byte
+        header to the USB data stage: [bRequest=0x01, wValue_hi, wValue_lo, 0x00].
+        For the long path (>= 3 bytes) the driver builds this from the 3-byte IOCTL
+        InBuffer + a padding byte; for the short path it is embedded in InBuffer
+        directly (nInBufferSize = nBytes + 4).  Either way the device sees:
+            [0x01, wValue_hi, wValue_lo, 0x00] + payload
+        """
+        header = bytes([0x01, (wValue >> 8) & 0xFF, wValue & 0xFF, 0x00])
+        wire_data = header + data
+        self._dev.ctrl_transfer(
+            self._T_SET, self._BREQUEST, wValue, self._WINDEX, wire_data,
+            timeout=self._timeout,
+        )
+
+    def vend_get(self, wValue: int, length: int) -> bytes:
+        """Vendor control IN (VEND_GET_CMD). Returns array of `length` bytes."""
+        result = self._dev.ctrl_transfer(
+            self._T_GET, self._BREQUEST, wValue, self._WINDEX, length,
+            timeout=self._timeout,
+        )
+        return bytes(result)
+
+    def bulk_write(self, data: bytes) -> int:
+        """Write raw bytes to the bulk-OUT endpoint."""
+        return int(self._ep_out.write(data, timeout=self._timeout))
 
 
-def vend_get(dev: Any, wValue: int, length: int, timeout:int=2000) -> bytes:
-    """Vendor control IN (VEND_GET_CMD). Returns array of `length` bytes."""
-    if _mock:
+# ── Mock link (test/UI-no-hardware double) ───────────────────────────────────
+
+class MdxMockUSB:
+    """In-process mock that implements the `MdxLink` interface without
+    touching real USB. Transfers short-circuit:
+
+      - vend_set: no-op.
+      - vend_get: zero-filled buffer. Special cases:
+          wValue=0x0002 → b'\\x00\\x00\\x12\\x34' (endian sig — MDX40A handshake check).
+          wValue=0x0001 → b'\\x00\\x00\\x00\\xff' (ping: byte[3]=0xff means
+              "response of length 255 is ready"). Allows `MDX40A.pattern_b_read`
+              to terminate immediately when running against the mock —
+              otherwise the polling loop would spin until poll_timeout.
+      - bulk_write: returns len(data).
+    """
+
+    def __init__(self) -> None:
+        log.info("MdxMockUSB created")
+
+    # ── Lifecycle ────────────────────────────────────────────────────────────
+
+    def release(self) -> None:
+        pass
+
+    def __enter__(self) -> "MdxMockUSB":
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        pass
+
+    # ── Transfer primitives ──────────────────────────────────────────────────
+
+    def vend_set(self, wValue: int, data: bytes = b"") -> None:
+        pass
+
+    def vend_get(self, wValue: int, length: int) -> bytes:
         if wValue == 0x0002:
-            # Machine-type probe: high word 0x1234 = MDX-40A confirmed (endian check).
             return (b"\x00\x00\x12\x34" + b"\x00" * length)[:length]
-        return bytes(bytearray(length))
-    t = _trace.get_active()
-    try:
-        result = dev.ctrl_transfer(
-            _T_GET, _BREQUEST, wValue, _WINDEX, length, timeout=timeout
-        )
-        bs = bytes(result)
-        if t:
-            t.log_get(wValue, bs)
-        return bs
-    except Exception as exc:
-        if t:
-            t.log_error("GET", wValue, exc)
-        raise
+        if wValue == 0x0001 and length >= 4:
+            # Ping: byte[3]=0xff = "max response ready" so MDX40A.pattern_b_read exits the loop.
+            return b"\x00\x00\x00\xff"
+        return bytes(length)
 
-
-def trigger_read(dev: Any, trig_wvalue: int, length: int, timeout:int=2000) -> bytes:
-    """Pattern B: SET trigger wValue to prime device, then GET wValue=0x0003.
-
-    Returns the GET response as `bytes` (pyusb's raw `array('B', ...)` wrapped
-    so logs and downstream consumers see a clean b'\\x00...' representation).
-    """
-    if _mock:
-        return b"\x00" * length
-    vend_set(dev, trig_wvalue, timeout=timeout)
-    return vend_get(dev, 0x0003, length, timeout=timeout)
-
-
-def trigger_read_b(
-    dev: Any, wValue: int, max_length: int, poll_timeout:float=0.200, timeout:int=2000
-) -> bytes:
-    """Pattern B with ping polling (RE: dev_trigger_read @ 0x0041bb90).
-
-    SET wValue → poll GET 0x0001 until ping[3] (C LE *uint32 >> 24) is non-zero
-    (= firmware-reported response length) → GET 0x0003 of that many bytes.
-    Returns bytes on success, None on timeout or device error.
-    """
-    if _mock:
-        return bytes(bytearray(max_length))
-    vend_set(dev, wValue, b"", timeout=timeout)
-    deadline = time.monotonic() + poll_timeout
-    while time.monotonic() < deadline:
-        ping = vend_get(dev, 0x0001, 4, timeout=timeout)
-        if len(ping) >= 4:
-            if ping[2] & 0x10:  # bit 20 = device error
-                raise ValueError("Machine has device error bit set")
-            length = min(ping[3], max_length)
-            if length:
-                return vend_get(dev, 0x0003, length, timeout=timeout)
-        time.sleep(0.005)
-    raise ValueError("Read timeout")
-
-
-def bulk_write(dev: Any, data: bytes, timeout:int=2000) -> int:
-    """Write raw bytes to the bulk-OUT endpoint."""
-    t = _trace.get_active()
-    if _mock:
-        if t:
-            t.log_bulk(data)
+    def bulk_write(self, data: bytes) -> int:
         return len(data)
-    ep_out = None
+
+
+# ── Internal helpers ─────────────────────────────────────────────────────────
+
+def _find_bulk_out(dev: Any) -> Optional[Any]:
+    """Return the first bulk-OUT endpoint exposed by the device, or None."""
     for cfg in dev:
         for intf in cfg:
             for ep in intf:
@@ -202,16 +238,23 @@ def bulk_write(dev: Any, data: bytes, timeout:int=2000) -> int:
                     and usb.util.endpoint_type(ep.bmAttributes)
                     == usb.util.ENDPOINT_TYPE_BULK
                 ):
-                    ep_out = ep
-                    break
-    if ep_out is None:
-        raise usb.core.USBError("No bulk-OUT endpoint found")
-    try:
-        n = int(ep_out.write(data, timeout=timeout))
-        if t:
-            t.log_bulk(data)
-        return n
-    except Exception as exc:
-        if t:
-            t.log_error("BULK", None, exc)
-        raise
+                    return ep
+    return None
+
+
+# ── CLI smoke test (real device only) ────────────────────────────────────────
+
+def main() -> None:
+    """Open the real USB layer: discover the device, then release.
+    No machine-level handshake.
+
+    """
+    logging.basicConfig(level=logging.INFO,
+                        format="%(levelname)s %(name)s: %(message)s")
+    with MdxUSB.discover():
+        pass
+    print("released ok")
+
+
+if __name__ == "__main__":
+    main()

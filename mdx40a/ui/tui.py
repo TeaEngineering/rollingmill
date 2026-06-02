@@ -44,8 +44,8 @@ from ..machine import (FLAG_VIEW_LED, FLAG_DOOR, FLAG_SPINDLE, FLAG_CMD_MOVE,
                        FLAG_TOOLBTN, FLAG_NC_READY, FLAG_MOVING, FLAG_BUSY,
                        FLAG_ERROR, FLAG_STATE, FLAG_STATE_SHIFT, JOG_SPEED_MAX,
                        STATE_MAP)
+from ..trace import Tracer
 from ..cutjob import CutJob
-from . import log as _log
 
 # ── Jog parameters ────────────────────────────────────────────────────────────
 
@@ -106,9 +106,11 @@ class _LogBuffer(logging.Handler):
 # ── TUI ───────────────────────────────────────────────────────────────────────
 
 class TUI:
-    def __init__(self, machine: _machine.MDX40A, log_buf: _LogBuffer):
+    def __init__(self, machine: _machine.MDX40A, log_buf: _LogBuffer,
+                 tracer: Optional[Tracer] = None):
         self._m            = machine
         self._log          = log_buf
+        self._tracer       = tracer
         self._step_i       = 2           # index into STEPS_LINEAR / STEPS_ROTARY (default 1.0mm / 1.0°)
         self._speed_i      = 1           # index into SPEED_PRESETS; `f` cycles (default slow)
         self._moving       : Optional[str] = None   # axis currently jogging (None → idle)
@@ -275,16 +277,12 @@ class TUI:
 
         if key in (ord('f'), ord('F')):
             self._speed_i = (self._speed_i + 1) % len(SPEED_PRESETS)
-            t = _trace.get_active()
-            if t:
-                t.annotate(f"KEY f  speed={SPEED_PRESETS[self._speed_i][0]}")
+            self.annotate(f"KEY f  speed={SPEED_PRESETS[self._speed_i][0]}")
         elif key in (ord('1'), ord('2'), ord('3'), ord('4'), ord('5')):
             self._step_i = key - ord('1')
             lin = STEPS_LINEAR[self._step_i]
             rot = STEPS_ROTARY[self._step_i]
-            t = _trace.get_active()
-            if t:
-                t.annotate(f"KEY {chr(key)}  step={lin}mm/{rot}°")
+            self.annotate(f"KEY {chr(key)}  step={lin}mm/{rot}°")
         elif key in (ord('s'), ord('S')):
             self._toggle_spindle()
         elif key == ord('<'):
@@ -306,12 +304,19 @@ class TUI:
         elif key in (ord('p'), ord('P')):
             self._m.fetch_axis_snapshot()
 
+    def annotate(self, msg: str) -> None:
+        """Write a `# <msg>` marker to the trace, if a tracer was attached.
+
+        Centralises the previous `t = _trace.get_active(); if t: t.annotate(...)`
+        pattern so callers can just write `self.annotate("…")` and stay
+        decoupled from the global-state plumbing.
+        """
+        if self._tracer is not None:
+            self._tracer.annotate(msg)
+
     def _annotate_nc_key(self, key_label: str, action: str, job: CutJob) -> None:
         """Write a `# KEY <k> <action> ...` marker for an NC-panel key press."""
-        t = _trace.get_active()
-        if not t:
-            return
-        t.annotate(
+        self.annotate(
             f"KEY {key_label}  {action}  "
             f"state={job.state}  block={job.block_idx}/{job.total}  "
             f"file={job.filename!r}"
@@ -324,10 +329,10 @@ class TUI:
         dist  = sign * step
         speed = SPEED_PRESETS[self._speed_i][1]
 
-        t = _trace.get_active()
-        if t:
-            unit = '°' if axis == 'A' else 'mm'
-            t.annotate(f"JOG {axis} {dist:+.3f}{unit}  speed={speed}  cmd=0x4f5/displacement")
+        unit = '°' if axis == 'A' else 'mm'
+        self.annotate(
+            f"JOG {axis} {dist:+.3f}{unit}  speed={speed}  cmd=0x4f5/displacement"
+        )
 
         try:
             self._m.send_jog(axis, dist, speed=speed)
@@ -383,9 +388,7 @@ class TUI:
 
     def _adjust_spindle_rpm(self, delta: int) -> None:
         new_rpm = self._m.spindle_target_rpm + delta
-        t = _trace.get_active()
-        if t:
-            t.annotate(f"KEY <>  spindle_target_rpm={new_rpm}")
+        self.annotate(f"KEY <>  spindle_target_rpm={new_rpm}")
         # While the spindle is off, only adjust the cached target — `s` will
         # push it to the device when the user actually starts the spindle.
         # While running, push live so the new RPM takes effect immediately.
@@ -403,9 +406,7 @@ class TUI:
         else:
             self._m.set_spindle_speed_cached(pct)
         self._m.set_cutting_feed(pct)
-        t = _trace.get_active()
-        if t:
-            t.annotate(f"KEY +-  override_pct={pct}")
+        self.annotate(f"KEY +-  override_pct={pct}")
 
     # ── Drawing ───────────────────────────────────────────────────────────────
 
@@ -513,7 +514,7 @@ class TUI:
             feed_pct    = self._m.cutting_feed_pct
             tgt_rpm     = self._m.spindle_target_rpm
             actual_rpm  = tgt_rpm * spd_pct // 100
-            live        = self._m.spindle_live_speed
+            live        = s.spindle_rpm
             live_str    = f'{live:5d}' if live is not None else '    ?'
             state_str   = 'ON ' if spindle_on else 'off'
             state_attr  = (CP(_CP_STATUS) | BOLD) if spindle_on else CP(_CP_LABEL)
@@ -864,9 +865,7 @@ class TUI:
             self._move_sel = min(len(targets) - 1, self._move_sel + 1)
         elif key in (10, 13):
             label, action = targets[self._move_sel]
-            t = _trace.get_active()
-            if t:
-                t.annotate(f"KEY m  move target={label!r}")
+            self.annotate(f"KEY m  move target={label!r}")
             if action is None:
                 # User Specify — close picker, queue numeric entry modal
                 self._move_open = False
@@ -1159,21 +1158,24 @@ def main(argv=None) -> None:
     root.addHandler(log_buf)
     root.setLevel(level)
     logging.getLogger('usb').setLevel(logging.WARNING)
+    # Our own modules emit INFO during discover/handshake/jog — make sure those
+    # land in `log_buf` even at -v=0 (which sets root to WARNING). Setting the
+    # `mdx40a` logger to an explicit floor bypasses root's level filter for any
+    # `mdx40a.*` sublogger (since effective-level walks stop at the first
+    # non-NOTSET ancestor). -vv still enables DEBUG for our code.
+    logging.getLogger('mdx40a').setLevel(min(level, logging.INFO))
 
-    if args.mock:
-        from .. import usb as _usb
-        _usb.set_mock()
+    from ..usb import MdxUSB, MdxMockUSB
 
-    with _trace.open_trace() as t:
-        _trace.set_active(t)
+    raw_link = MdxMockUSB() if args.mock else MdxUSB.discover()
+    with _trace.open_trace() as t, t.wrap_link(raw_link) as link:
         import sys
         t.annotate(f"argv: {' '.join(sys.argv)}")
-        with _machine.MDX40A() as m:
-            tui = TUI(m, log_buf)
-            if args.file:
-                tui.load_nc_file(args.file)
-            curses.wrapper(tui.run)
-        _trace.set_active(None)
+        m = _machine.MDX40A(link)
+        tui = TUI(m, log_buf, t)
+        if args.file:
+            tui.load_nc_file(args.file)
+        curses.wrapper(tui.run)
 
 
 if __name__ == '__main__':

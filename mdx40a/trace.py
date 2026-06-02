@@ -19,8 +19,10 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from types import TracebackType
+
+from .usb import MdxLink
 
 
 class Tracer:
@@ -69,6 +71,19 @@ class Tracer:
         for line in text.splitlines():
             self._write(f"# {line}")
 
+    def wrap_link(self, link: MdxLink) -> "_TracingLink":
+        """Return an `MdxLink` that logs every transfer call to this tracer.
+
+        Use:
+            tracer = open_trace()
+            link = tracer.wrap_link(MdxUSB.discover())
+            machine = MDX40A(link)
+
+        The wrapper supports the context-manager protocol; on `__exit__` it
+        calls `release()` on the inner link.
+        """
+        return _TracingLink(link, self)
+
     def close(self) -> None:
         with self._lock:
             if not self._fh.closed:
@@ -100,6 +115,55 @@ class Tracer:
             self._fh.write(f"{ts} {text}\n")
 
 
+class _TracingLink:
+    """`MdxLink` wrapper produced by `Tracer.wrap_link`. Delegates the three
+    primitive transfers to the inner link and logs each one. Errors raised by
+    the inner link are recorded as `! ERR …` lines and re-raised."""
+
+    def __init__(self, inner: MdxLink, tracer: Tracer):
+        self._inner = inner
+        self._tracer = tracer
+
+    # ── Lifecycle ────────────────────────────────────────────────────────────
+
+    def release(self) -> None:
+        self._inner.release()
+
+    def __enter__(self) -> "_TracingLink":
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        self.release()
+
+    # ── Transfer primitives ──────────────────────────────────────────────────
+
+    def vend_set(self, wValue: int, data: bytes = b"") -> None:
+        try:
+            self._inner.vend_set(wValue, data)
+        except Exception as exc:
+            self._tracer.log_error("SET", wValue, exc)
+            raise
+        self._tracer.log_set(wValue, data)
+
+    def vend_get(self, wValue: int, length: int) -> bytes:
+        try:
+            bs = self._inner.vend_get(wValue, length)
+        except Exception as exc:
+            self._tracer.log_error("GET", wValue, exc)
+            raise
+        self._tracer.log_get(wValue, bs)
+        return bs
+
+    def bulk_write(self, data: bytes) -> int:
+        try:
+            n = self._inner.bulk_write(data)
+        except Exception as exc:
+            self._tracer.log_error("BULK", None, exc)
+            raise
+        self._tracer.log_bulk(data)
+        return n
+
+
 def open_trace() -> Tracer:
     """Create ~/roland/<timestamp>.txt and return a Tracer for it."""
     directory = Path.home() / "roland"
@@ -112,15 +176,3 @@ def open_trace() -> Tracer:
     return Tracer(path)
 
 
-# ── Module-level active tracer (set by caller, used by usb.py) ───────────────
-
-_active: Optional[Tracer] = None
-
-
-def set_active(t: Optional["Tracer"]) -> None:
-    global _active
-    _active = t
-
-
-def get_active() -> Optional["Tracer"]:
-    return _active
