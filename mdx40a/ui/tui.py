@@ -630,6 +630,12 @@ class TUI:
             axis = chr(key).upper()
             if self._m.partial_update_wcs_origin(slot, axis) and self._wcs_data:
                 self._wcs_data[slot] = self._m.get_wcs_origin(slot)
+        elif key == ord('0'):
+            if self._wcs_sel == 0:
+                return   # cannot overwrite MCS
+            slot = self._wcs_sel
+            self._m.write_wcs_origin(slot, 0, 0, 0, 0)
+            self._wcs_data[slot] = self._m.get_wcs_origin(slot)
         elif key in (ord('r'), ord('R')):         # Reload all origins from device
             self._wcs_data    = None
             self._wcs_load()
@@ -696,7 +702,7 @@ class TUI:
 
         # Key reference — separator at dh-3, keys at dh-2, border at dh-1
         ref_row = dh - 3
-        keys = ' ↑↓ navigate   ↵ activate   M move to   XYZA overwrite axis   Esc close'
+        keys = ' ↑↓ navigate   ↵ activate   M move to   XYZA set axis  0 zero  Esc close'
         win.addstr(ref_row,     1, '─' * (dw - 2), CP(_CP_LABEL))
         win.addstr(ref_row + 1, 1, keys[:dw - 2],  CP(_CP_KEYS))
 
