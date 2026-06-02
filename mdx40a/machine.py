@@ -32,6 +32,24 @@ JOG_SPEED_MAX = 0xFFFF  # firmware maximum
 SPINDLE_RPM_MIN =  4500
 SPINDLE_RPM_MAX = 15000
 
+# WCS slot display labels (index = slot number passed to set_active_wcs /
+# get_wcs_origin / write_wcs_origin / partial_update_wcs_origin).
+# Slot 0 is the machine coordinate system; 1 = RML-1 user origin; 2 = EXOFS;
+# 3-8 = the six G54-G59 work coordinate systems. Slots 9-10 exist in the
+# firmware wValue tables (see _WCS_READ_WVAL/_WCS_WRITE_WVAL) but VPanel
+# doesn't expose them — no canonical label, so wcs_label() falls back.
+WCS_SLOT_NAMES = ['MCS', 'User (RML-1)', 'EXOFS'] + [f'WCS{1+d} (G{54+d})' for d in range(6)]
+
+
+def wcs_label(slot: int) -> str:
+    """Human-readable label for a WCS slot index. Used in log messages so
+    e.g. slot=3 appears as 'WCS1 (G54)' rather than 'WCS3'. Falls back to a
+    bare slot tag for indices outside WCS_SLOT_NAMES."""
+    if 0 <= slot < len(WCS_SLOT_NAMES):
+        return WCS_SLOT_NAMES[slot]
+    return f"slot{slot}"
+
+
 # WCS slot Pattern B read wValues (slots 1-10, 0-indexed in tuple)
 # RE: query_coord_system_by_index @ 0x00403910 → GET wValue returns 4×uint32 XYZA
 _WCS_READ_WVAL = (
@@ -731,12 +749,12 @@ class MDX40A:
         try:
             data = self.pattern_b_read(wv, 16)
             if data is None or len(data) < 16:
-                log.warning("get_wcs_origin(%d): short/no response", slot)
+                log.warning("get_wcs_origin(%s): short/no response", wcs_label(slot))
                 return None
             x, y, z, a = struct.unpack_from('>4i', bytes(data))
             return (x / 1000.0, y / 1000.0, z / 1000.0, a / 1000.0)
         except usb.core.USBError as e:
-            log.warning("get_wcs_origin(%d) failed: %s", slot, e)
+            log.warning("get_wcs_origin(%s) failed: %s", wcs_label(slot), e)
             return None
 
     def set_active_wcs(self, slot: int) -> None:
@@ -748,7 +766,7 @@ class MDX40A:
         if not 0 <= slot <= 10:
             raise ValueError(f"WCS slot must be 0–10, got {slot}")
         try:
-            log.info("Active WCS → %d", slot)
+            log.info("Active WCS → %s", wcs_label(slot))
             self._active_wcs = slot
             if slot == 0:
                 self._wcs_offset = (0.0, 0.0, 0.0, 0.0)
@@ -756,7 +774,7 @@ class MDX40A:
                 origin = self.get_wcs_origin(slot)
                 self._wcs_offset = origin if origin else (0.0, 0.0, 0.0, 0.0)
         except usb.core.USBError as e:
-            log.warning("set_active_wcs(%d) failed: %s", slot, e)
+            log.warning("set_active_wcs(%s) failed: %s", wcs_label(slot), e)
 
     def write_wcs_origin(
         self, slot: int,
@@ -781,12 +799,12 @@ class MDX40A:
         )
         try:
             self._link.vend_set(wv, payload)
-            log.info("WCS%d origin written: (%.3f, %.3f, %.3f, %.3f°)",
-                     slot, x_mm, y_mm, z_mm, a_deg)
+            log.info("%s origin written: (%.3f, %.3f, %.3f, %.3f°)",
+                     wcs_label(slot), x_mm, y_mm, z_mm, a_deg)
             if slot == self._active_wcs:
                 self._wcs_offset = (x_mm, y_mm, z_mm, a_deg)
         except usb.core.USBError as e:
-            log.warning("write_wcs_origin(%d) failed: %s", slot, e)
+            log.warning("write_wcs_origin(%s) failed: %s", wcs_label(slot), e)
             return False
         return self._wait_ping_bit21()
 
@@ -805,7 +823,8 @@ class MDX40A:
 
         origin = self.get_wcs_origin(slot)
         if origin is None:
-            log.warning("partial_update_wcs_origin(%d, %s): re-read failed", slot, axis)
+            log.warning("partial_update_wcs_origin(%s, %s): origin re-read failed",
+                        wcs_label(slot), axis)
             return False
 
         x, y, z, a = origin
@@ -1073,7 +1092,7 @@ class MDX40A:
         wcs_code = self._active_wcs if wcs is None else wcs
         self._send_bracketed(
             0x3501, struct.pack('>HHH', wcs_code, axis_mask, speed),
-            f"Move to origin: wcs={wcs_code} mask=0x{axis_mask:x} speed={speed}",
+            f"Move to origin: wcs={wcs_label(wcs_code)} mask=0x{axis_mask:x} speed={speed}",
         )
 
     def move_to_rotation_center_y(self, speed: int = JOG_SPEED_MAX) -> None:

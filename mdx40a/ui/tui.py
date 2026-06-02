@@ -43,7 +43,7 @@ from .. import trace as _trace
 from ..machine import (FLAG_VIEW_LED, FLAG_DOOR, FLAG_SPINDLE, FLAG_CMD_MOVE,
                        FLAG_TOOLBTN, FLAG_NC_READY, FLAG_MOVING, FLAG_BUSY,
                        FLAG_ERROR, FLAG_STATE, FLAG_STATE_SHIFT, JOG_SPEED_MAX,
-                       STATE_MAP)
+                       STATE_MAP, WCS_SLOT_NAMES)
 from ..trace import Tracer
 from ..cutjob import CutJob
 
@@ -122,7 +122,6 @@ class TUI:
         self._wcs_open           = False
         self._wcs_sel            = 0        # selected row: 0=MCS, 1-10=WCS1-10
         self._wcs_data           : Optional[list] = None   # list[11] of (x,y,z,a)|None
-        self._wcs_loading        = False
         self._coord_entry_pending = False   # set by Move picker's User Specify entry; consumed in run loop
         # Move-To picker state ('m' key)
         self._move_open          = False
@@ -331,7 +330,7 @@ class TUI:
 
         unit = '°' if axis == 'A' else 'mm'
         self.annotate(
-            f"JOG {axis} {dist:+.3f}{unit}  speed={speed}  cmd=0x4f5/displacement"
+            f"JOG {axis} {dist:+.3f}{unit}  speed={speed}"
         )
 
         try:
@@ -456,7 +455,7 @@ class TUI:
         speed_lbl = SPEED_PRESETS[self._speed_i][0]
         lin_lbl   = STEPS_LINEAR[self._step_i]
         rot_lbl   = STEPS_ROTARY[self._step_i]
-        wcs_lbl   = 'MCS' if self._m.active_wcs == 0 else f'WCS{self._m.active_wcs}'
+        wcs_lbl   = WCS_SLOT_NAMES[self._m.active_wcs]
         rotary_lbl = {0: "No Extension", 1: "Rotary Axis", 2: "Rotary Vice"}.get(
             self._m.rotary_extension_byte, "?")
         title     = f" Roland MDX-40A  │  {speed_lbl}  │  XYZ {lin_lbl}mm  A {rot_lbl}°  │  {wcs_lbl}  │  {rotary_lbl} "
@@ -601,7 +600,6 @@ class TUI:
         self._wcs_open    = True
         self._wcs_sel     = self._m.active_wcs   # start cursor on active slot
         self._wcs_data    = None
-        self._wcs_loading = True
         self._wcs_load()
 
     def _wcs_load(self) -> None:
@@ -609,7 +607,6 @@ class TUI:
         for slot in range(1, 11):
             data.append(self._m.get_wcs_origin(slot))
         self._wcs_data    = data
-        self._wcs_loading = False
 
     def _wcs_handle_key(self, key: int) -> None:
         if key in (27, ord('q'), ord('Q')):       # Esc / q — close
@@ -618,7 +615,7 @@ class TUI:
         if key == curses.KEY_UP:
             self._wcs_sel = max(0, self._wcs_sel - 1)
         elif key == curses.KEY_DOWN:
-            self._wcs_sel = min(10, self._wcs_sel + 1)
+            self._wcs_sel = min(len(WCS_SLOT_NAMES)-1, self._wcs_sel + 1)
         elif key in (10, 13):                      # Enter — activate
             self._m.set_active_wcs(self._wcs_sel)
         elif key in (ord('m'), ord('M')):          # Move to stored origin
@@ -639,7 +636,6 @@ class TUI:
                 self._wcs_data[slot] = self._m.get_wcs_origin(slot)
         elif key in (ord('r'), ord('R')):         # Reload all origins from device
             self._wcs_data    = None
-            self._wcs_loading = True
             self._wcs_load()
 
     def _draw_wcs_dialog(self, stdscr: curses.window, rows: int, cols: int) -> None:
@@ -660,8 +656,7 @@ class TUI:
         win.box()
 
         # Title row
-        loading = '  loading…' if self._wcs_loading else ''
-        title = f' Coordinate Systems{loading}'
+        title = f' Coordinate Systems'
         win.addstr(0, 2, title[:dw - 4], CP(_CP_HEADER) | BOLD)
 
         if dh < 5:
@@ -669,29 +664,27 @@ class TUI:
             return
 
         # Column headers
-        hdr = f"{'':4s}  {'X (mm)':>12s}  {'Y (mm)':>12s}  {'Z (mm)':>12s}  {'A (°)':>10s}"
+        hdr = f"{'':12s}  {'X (mm)':>12s}  {'Y (mm)':>12s}  {'Z (mm)':>12s}  {'A (°)':>10s}"
         win.addstr(1, 1, hdr[:dw - 2], CP(_CP_LABEL))
         win.addstr(2, 1, '─' * (dw - 2), CP(_CP_LABEL))
 
-        # Data rows: 0=MCS, 1-10=WCS1-10
-        for i in range(min(11, dh - 5)):
+        # Data rows
+        for i in range(min(9, dh - 5)):
             row = 3 + i
             if row >= dh - 3:
                 break
-            label   = 'MCS ' if i == 0 else f'WC{i:<2d}'
+            label = WCS_SLOT_NAMES[i]
             is_active   = (i == self._m.active_wcs)
             is_selected = (i == self._wcs_sel)
 
             if self._wcs_data and self._wcs_data[i] is not None:
                 x, y, z, a = self._wcs_data[i]
                 vals = f'{x:>+12.3f}  {y:>+12.3f}  {z:>+12.3f}  {a:>+10.3f}'
-            elif self._wcs_loading:
-                vals = f'{"…":>12s}  {"…":>12s}  {"…":>12s}  {"…":>10s}'
             else:
                 vals = f'{"?":>12s}  {"?":>12s}  {"?":>12s}  {"?":>10s}'
 
             suffix = ' ACT' if is_active else '    '
-            line   = f' {label} {vals} {suffix}'
+            line   = f' {label:12s} {vals} {suffix}'
 
             if is_selected:
                 attr = CP(_CP_ACTIVE) | BOLD
