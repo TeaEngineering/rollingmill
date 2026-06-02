@@ -23,10 +23,9 @@ Keybindings:
   q          quit
 
 Cut panel (visible when --file is given):
-  r          run — stream file continuously in bulk mode
-  x          step mode — pause before each block
-  n / Space  send next block (step mode)
-  p          pause bulk run (enter step mode)
+  r          run — stream the file continuously to the end
+  x          step — send one block; or, while running, stop after the
+             current block (parks back in step mode)
 
 Run: python3 -m mdx40a.ui.tui [-v|-vv] [--file <file.nc>]
 """
@@ -180,9 +179,8 @@ class TUI:
     # ── NC file ───────────────────────────────────────────────────────────────
 
     def load_nc_file(self, path: str) -> None:
-        """Load an NC/RML file and arm the cut panel in step mode."""
+        """Load an NC/RML file into the cut panel. Ready to step or run."""
         self._cut_job = CutJob.from_file(self._m, path)
-        self._cut_job.start_step()
 
     # ── Colour setup ──────────────────────────────────────────────────────────
 
@@ -236,26 +234,29 @@ class TUI:
             self._quit = True
             return
 
-        # NC cut panel keys (when a file is loaded)
+        # NC cut panel keys. `r` and `x` each map to one of two CutJob
+        # actions; the can_* predicates decide which (and the same predicates
+        # drive the hint text below).
         if self._cut_job:
             job = self._cut_job
             if key in (ord('r'), ord('R')):
-                self._annotate_nc_key('r', 'RUN', job)
-                job.start_run()
-                return
+                if job.can_run:
+                    self._annotate_nc_key('r', 'RUN', job)
+                    job.run()
+                    return
+                if job.can_restart:
+                    self._annotate_nc_key('r', 'RESTART', job)
+                    job.restart()
+                    return
             if key in (ord('x'), ord('X')):
-                self._annotate_nc_key('x', 'STEP', job)
-                job.start_step()
-                return
-            if key in (ord('n'), ord('N'), ord(' '), 10, 13):
-                self._annotate_nc_key(chr(key) if 32 <= key < 127 else 'ENTER',
-                                      'NEXT_BLOCK', job)
-                job.next_block()
-                return
-            if key in (ord('p'), ord('P')):
-                self._annotate_nc_key('p', 'PAUSE', job)
-                job.pause()
-                return
+                if job.can_step:
+                    self._annotate_nc_key('x', 'STEP', job)
+                    job.step()
+                    return
+                if job.can_pause:
+                    self._annotate_nc_key('x', 'STOP', job)
+                    job.pause()
+                    return
 
         JOG_KEYS = {
             curses.KEY_RIGHT: ('X', +1),
@@ -320,6 +321,18 @@ class TUI:
             f"state={job.state}  block={job.block_idx}/{job.total}  "
             f"file={job.filename!r}"
         )
+
+    @staticmethod
+    def _nc_key_hint(job: CutJob) -> str:
+        """Build the key-hint line from the job's `can_*` predicates so it
+        always lists exactly the keys that currently do something."""
+        parts = []
+        if job.can_run:     parts.append('r run')
+        if job.can_restart: parts.append('r restart')
+        if job.can_step:    parts.append('x step')
+        if job.can_pause:   parts.append('x stop')
+        parts.append('q quit')
+        return '  '.join(parts)
 
     def _start_jog(self, axis: str, sign: int) -> None:
         if self._jog_armed:
@@ -1049,14 +1062,7 @@ class TUI:
         st    = job.state
         pct   = int(100 * idx / total) if total else 0
 
-        mode_lbl = {
-            CutJob.IDLE:     'IDLE',
-            CutJob.STEPPING: 'STEP',
-            CutJob.WAITING:  'WAIT',
-            CutJob.RUNNING:  'RUN ',
-            CutJob.DONE:     'DONE',
-            CutJob.ERROR:    'ERR ',
-        }.get(st, st[:4].upper())
+        mode_lbl = st.upper()
 
         bar_w  = max(4, min(20, cols // 5))
         filled = int(bar_w * idx / total) if total else 0
@@ -1069,8 +1075,9 @@ class TUI:
         hdr_attr = CP(_CP_LOG_ERR) | BOLD if st == CutJob.ERROR else CP(_CP_LABEL) | BOLD
         self._put(win, start, 0, hdr, hdr_attr)
 
-        # Key hint on the right of the header row
-        hint = 'r run  x step  n/Spc next  p pause'
+        # Key hint on the right of the header row — only the keys that do
+        # something in the current state.
+        hint = self._nc_key_hint(job)
         hint_col = max(0, cols - len(hint) - 1)
         self._put(win, start, hint_col, hint, CP(_CP_KEYS))
 

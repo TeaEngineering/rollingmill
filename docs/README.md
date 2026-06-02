@@ -4,16 +4,17 @@ The MDX-40A is installed as a Windows printer (Class=Printer), not a raw USB HID
 
 The key components are:
 
-| File          | Role                                             |
-|---------------|--------------------------------------------------|
-| VP_MDX40A.exe | VPanel application                               |
-| RD25DGR64.DLL | Graphics DLL — the print driver proper           |
-| RD25DUI64.DLL | UI/config DLL — printer properties pages         |
-| rdlm64.dll    | Language Monitor                                 |
-| rd25dlf64.dll | Language Filter (chained with LM)                |
-| MDX40Ax64.RPD | Roland Printer Descriptor — machine capabilities |
-| MDX40AMAT.DAT | Material/tool data                               |
+| File          | Role                                             | sha256 |
+|---------------|--------------------------------------------------|-------------------
+| VP_MDX40A.exe | VPanel application                               | e360efc53452a71db41ddbe803c161c8a1e90987def6c2ebf44cf4cb6ee6c736 |
+| RD25DGR64.DLL | Graphics DLL — the print driver proper           | 4315f516e3f69329827baca1819a70bb4a589296e5bbd365d3474e6676f17a61 |
+| RD25DUI64.DLL | UI/config DLL — printer properties pages         | cbc2417d3470b3394d5029144b6f50e6d30fbebc3386aaa4eb3170ff1d6f372c |
+| rdlm64.dll    | Language Monitor                                 | 87700f4e62eab3e26cdf480d04924e7c1a869e6c555343c3af416e8ef4a58f00 |
+| rd25dlf64.dll | Language Filter (chained with LM - not stripped, only JP) | 00ffe3295d0fac73d0ded9c9bdded3d14548f4110d0223564d6e1b8fea0e8811 |
+| MDX40Ax64.RPD | Roland Printer Descriptor — machine capabilities | - |
+| MDX40AMAT.DAT | Material/tool data                               | - |
 
+I used Ghidra 12.0.4 for the dissassembly work.
 
 Windows:
 
