@@ -36,7 +36,7 @@ import collections
 import curses
 import logging
 import time
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 
 from .. import machine as _machine
 from .. import trace as _trace
@@ -99,7 +99,7 @@ class _LogBuffer(logging.Handler):
             text = record.getMessage()
         self._lines.append((record.levelno, text))
 
-    def tail(self, n: int) -> List[Tuple[int, str]]:
+    def tail(self, n: int) -> list[Tuple[int, str]]:
         return list(self._lines)[-n:]
 
 

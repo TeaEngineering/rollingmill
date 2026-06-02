@@ -32,7 +32,7 @@ States:
 
 import os
 import time
-from typing import List, Optional
+from typing import Optional
 
 from . import machine as _machine
 
@@ -81,7 +81,7 @@ class CutJob:
 
     # ── Construction ──────────────────────────────────────────────────────────
 
-    def __init__(self, machine: _machine.MDX40A, blocks: List[bytes], filename: str = ''):
+    def __init__(self, machine: _machine.MDX40A, blocks: list[bytes], filename: str = ''):
         self._m        = machine
         self._blocks   = blocks
         self._filename = filename
