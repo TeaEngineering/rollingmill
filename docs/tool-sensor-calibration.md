@@ -14,6 +14,8 @@ rod will work.
 `send_waypoint_allowing_cancel` is the actual probing primitive — the move
 stalls when the tool touches the jig edge, returning the position at contact.
 
+With the tool sensor calibrated, and the [Rotary axis known](rotary-jig-alignment.md) the tool tip (or a co-ordinate system origin) can be accurately set on the rotary axis centerline.
+
 ---
 
 ## Preconditions

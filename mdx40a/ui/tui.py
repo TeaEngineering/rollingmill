@@ -40,9 +40,10 @@ from typing import List, Optional, Tuple
 
 from .. import machine as _machine
 from .. import trace as _trace
-from ..machine import (FLAG_DOOR, FLAG_SPINDLE, FLAG_CMD_MOVE, FLAG_TOOLBTN,
-                       FLAG_MOVING, FLAG_BUSY, FLAG_ERROR,
-                       FLAG_STATE, FLAG_STATE_SHIFT, JOG_SPEED_MAX, STATE_MAP)
+from ..machine import (FLAG_VIEW_LED, FLAG_DOOR, FLAG_SPINDLE, FLAG_CMD_MOVE,
+                       FLAG_TOOLBTN, FLAG_NC_READY, FLAG_MOVING, FLAG_BUSY,
+                       FLAG_ERROR, FLAG_STATE, FLAG_STATE_SHIFT, JOG_SPEED_MAX,
+                       STATE_MAP)
 from ..cutjob import CutJob
 from . import log as _log
 
@@ -563,9 +564,11 @@ class TUI:
         # Each entry: (mask, label, active_cp, inactive_cp_or_None)
         # None for inactive_cp means don't show when inactive
         BITS = [
+            (FLAG_VIEW_LED, 'VIEW_LED', _CP_LOG_ERR, _CP_LOG_INFO),
             (FLAG_DOOR,     'DOOR',     _CP_LOG_ERR, _CP_LOG_INFO),
             (FLAG_SPINDLE,  'SPINDLE',  _CP_STATUS,  _CP_LOG_INFO),
             (FLAG_TOOLBTN,  'TOOLBTN',  _CP_MOVING,  _CP_LOG_INFO),
+            (FLAG_NC_READY, 'NC_READY', _CP_STATUS,  _CP_LOG_INFO),
             (FLAG_CMD_MOVE, 'CMD_MOVE', _CP_MOVING,  _CP_LOG_INFO),
             (FLAG_MOVING,   'MOVING',   _CP_MOVING,  _CP_LOG_INFO),
             (FLAG_BUSY,     'BUSY',     _CP_MOVING,  _CP_LOG_INFO),

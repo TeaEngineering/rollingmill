@@ -131,6 +131,54 @@ Shows: "Outputs N Page. Change work, please." Dialog: 7 = continue, 2 = cancel.
 
 ---
 
+## Command-set selection (RML-1 vs NC)
+
+The MDX-40A firmware parses incoming bulk-OUT data in one of **three** modes,
+matching the three radio buttons on the Setup → Modeling Machine tab. The
+selection is stored in `byte[1]` of the 6-byte machine-config struct accessible
+via GET 0x3106 / SET 0x3107. Mapping derived from the dialog's MFC `DDX_Radio`
+binding (control-ID range handler at `0xFD3..0xFD5` in message map `0x0043ecb0`,
+plus the enable-check `0 < value < 3` at `FUN_00402af0`):
+
+| `byte[1]` | Setup radio button | Behaviour |
+|---|---|---|
+| `0` | **RML-1** (IDC `0xFD3`) | RML-1 only. Sending G-code stalls the NC bytes-processed counter and the firmware raises an error bit. |
+| `1` | **NC Code** (IDC `0xFD4`) | NC Code only. Sending RML-1 stalls the counter and the firmware raises an error bit. |
+| `2` | **Selected automatically (RML-1/NC Code)** (IDC `0xFD5`) | Auto-detect: the firmware picks the parser based on the program's first byte (`%` or `(` → NC, otherwise RML-1). Safest default. |
+
+Called from `write_ncode_settings` @ `0x00402a20` when the Setup-tab NC/RML selection changes.
+
+Mirrored in `mdx40a/machine.py` as the constants `MDX40A.CMDSET_RML1`,
+`CMDSET_NC`, `CMDSET_AUTO`.
+
+### Symptom of the wrong mode
+
+Sending `%\r\nO00000001\r\n...` while in mode 0 (RML-1) advances the NC
+bytes-processed counter to 3 (the `%\r\n` is accepted as ASCII data) and then
+stops. Subsequent bulk writes return success at the USB layer but the firmware
+sets an error bit and stops advancing the counter, so `CutJob._service_ack`
+times out with `have 3, expected 14` (or similar). The same happens if you send
+RML-1 in mode 1 (NC Code only). Mode 2 accepts either format.
+
+### Read-modify-write switch — `write_ncode_settings @ 0x00402a20`
+
+VPanel applies the mode change via the Setup dialog. The disassembly is a plain
+read-modify-write of the 6-byte struct:
+
+```c
+cfg = query_0x3106_6bytes(machine);             // GET 0x3106, 6 bytes
+if (cfg.nc_rml_flags != desired) {
+    cfg.nc_rml_flags = desired;                 // byte[1] = 0 or 1
+    send_axis_config_0x3107(machine, &cfg);     // SET 0x3107, 6 bytes
+    wait_ping_bit21_clear(machine);
+}
+```
+
+Mirrored in `mdx40a/machine.py` as `MDX40A.set_command_set(mode)`. The setting
+is persisted by the firmware across power cycles.
+
+---
+
 ## Operation Bracket — SET 0x1109 (critical)
 
 `execute_cut_job` @ `0x00416360` calls `send_operation_bracket_0x1109` with `0x00` **before**
@@ -160,11 +208,11 @@ time, and synchronises with the machine between each block.
 - NC code detected if first non-empty block starts with `%` or `(`.
 - Test Cut is NC-only; if "Command Set = RML-1" is selected, the Test button is disabled.
 
-### Per-block send — FUN_00405b40 @ 0x00405b40
+### Per-block send — `nc_send_one_slice` @ 0x00405b40
 
 ```
 before   = GET wValue=0x0200, 4 bytes big-endian   // bytes-processed counter
-expected = before + block_byte_length
+expected = before + block_byte_length              // stored at AutoClass33+0x74 (active_coordsys)
 
 // Send via IPC shared memory (FUN_0041dd50):
 copy block_text → shared_memory[write_offset + 6]
@@ -181,8 +229,12 @@ its internal NC buffer. Step completion is detected when the counter reaches `be
 
 ### Bytes-processed counter — `get_nc_bytes_processed_0x200` @ 0x0041c290
 
-Pattern B read: `SET 0x0200 → GET 0x0003`, 4 bytes BE → uint32. Returned through the device
-session's `read_status_op` vtable slot. Three sites consume it:
+**Direct vendor-IN GET** at `wValue=0x0200, len=4`, 4 bytes big-endian → uint32. Issued through
+the device session's `read_status_op` vtable slot (`amc_lock_vtable +0x18`) with arguments
+`(wValue, buf, len)`. Disassembly confirms a single transfer — no preceding SET, no ping
+polling, **not Pattern B**. The firmware treats `returned_len == 4` as success.
+
+Three sites consume it:
 
 | Address | Role | Predicate |
 |---|---|---|
@@ -258,8 +310,14 @@ and is split block-by-block before reaching the USB.
 ### Required call sequence
 
 ```python
-machine.begin_nc_job()          # SET 0x1109 = 0x00  ← mandatory
-machine.bulk_write(nc_data)     # raw RML-1 / G-code bytes, any chunk size
+machine.set_command_set(1)      # SET 0x3107 byte[1]=1  ← put firmware in NC mode
+machine.begin_nc_job()          # SET 0x1109 = 0x00     ← mandatory bracket open
+for block in blocks:            # one CR/LF-terminated NC line per bulk-OUT
+    before = machine.get_nc_bytes_processed()
+    machine.bulk_write(block)
+    expected = (before + len(block)) & 0xFFFFFFFF
+    while machine.get_nc_bytes_processed() != expected:
+        time.sleep(0.005)
 machine.end_nc_job()            # SET 0x1109 = 0xFF
 ```
 
@@ -271,5 +329,26 @@ if ping != -1 and (ping & 0x00100010):   # bit 4 = device busy/error
     raise RuntimeError("Machine not ready for NC output")
 ```
 
-`CutJob` in `mdx40a/cutjob.py` handles the bracket automatically via `begin_nc_job()` /
-`end_nc_job()` calls around the first bulk write and the DONE/ERROR exit paths.
+`CutJob` in `mdx40a/cutjob.py` implements this loop — see `_send_block` and `_service_ack`.
+It handles the bracket automatically and sends one block per `service()` tick, gated on the
+counter. The mode switch is the caller's responsibility (do it once at connect).
+
+### Direct-USB hosts must throttle on the counter
+
+On Windows VPanel relies on USBPRINT.sys + rdlm64.dll for flow control: `WritePrinter` accepts
+32 KB at a time, the language monitor and printer-class driver buffer and split it into
+firmware-sized chunks invisibly. A direct-USB client (us, on macOS/Linux) has none of that
+machinery, so a bare 32 KB bulk-OUT write hangs the endpoint after the firmware's first-block
+buffer fills.
+
+`CutJob` mirrors VPanel's `nc_send_one_slice` loop: one CR/LF-terminated block per tick, gated
+on `counter == prev + len(block)`. The 32 KB chunking path was removed in favour of this; see
+the `Required call sequence` snippet above for the equivalent stand-alone loop.
+
+
+
+## NC Code on the machine
+
+* Uses workspace coordinate origins (read from machine)
+* uses tool offsets 1-9
+* uses current spindle speed (unless overritten by M...)

@@ -62,37 +62,43 @@ _TOOL_OFFSET_WRITE_WVAL = tuple(0x347a + i for i in range(1, 9))   # 0x347b..0x3
 _PING_BUSY_MASK  = 0x00200004   # bits 21 and 2 — firmware busy (jog motion-complete gate)
 _PING_ERROR_MASK = 0x00100000   # bit 20
 _PING_BIT21      = 0x00200000   # bit 21 alone — "command acknowledged" flag polled after
-                                 # SET 0x3901 (spindle RPM), SET 0x2425 (reset time), etc.
+                                # SET 0x3901 (spindle RPM), SET 0x2425 (reset time), etc.
 
 # ── Machine status flags (first 4 bytes of wValue=0x0100 block, big-endian) ──
 #
 # Decoded from VP_MDX40A.exe update_state_and_coords + wait_motion_complete_loop.
 # Byte ordering: Python struct '>I' gives the same value as the display.
 #
+#  bit 30  0x40000000  VIEW_LED   VIEW lamp lit on the front panel. Observed
+#                                  set after a partial NC program, when
+#                                  the firmware halts waiting for a missing
+#                                  end-of-program marker. Holding the VIEW
+#                                  button on the machine clears this bit.
 #  bit 28  0x10000000  DOOR       enclosure door open (jog inhibited while set)
 #  bit 27  0x08000000  SPINDLE    spindle motor on  (fires RPM/speed update)
 #  bit 26  0x04000000  CMD_MOVE   motion command executing
 #  bit 25  0x02000000  TOOLBUTTON using tool button on front pannel
+#  bit 23  0x00800000  NC_READY   Set in normal idle and during clean cuts;
+#                                  CLEARS when VIEW_LED (bit 30) goes high
+#                                  on a halted/incomplete program
 #  bit 22  0x00400000  MOVING     axis velocity > 0 (actually translating)
 #  18-16   0x00070000  STATE      machine state enum
 #                                   2 = idle / normal
 #                                   3 = motion commanded (triggers origin update on→2)
-#  bit 13  0x00002000  (always set in observed states — semantic unclear; do NOT
-#                       gate motion completion on this. VPanel's
-#                       jog_wait_busy_bits_clear @ 0x00417b00 actually polls
-#                       ping word bits 2 and 21, not this state-block bit.)
+#  bit 13  0x00002000  CMD_ACK    Last command was OK - I think
 #  bit 12  0x00001000  ERROR      error condition
-#  bit 23  0x00800000  ]
-#  bit 17  0x00020000  ] constant in all observed states — likely axis-present or
-#  bit 11  0x00000800  ] hw-config flags set at power-on; ignore for status display
-#  bit  4  0x00000010  ]
+#  bit 17  0x00020000  ]
+#  bit 11  0x00000800  ] constant in all observed states — likely axis-present or
+#  bit  4  0x00000010  ] hw-config flags set at power-on; ignore for status display
 #  bit  3  0x00000008  ]
 #  bit  2  0x00000004  ]
 
+FLAG_VIEW_LED = 0x40000000
 FLAG_DOOR     = 0x10000000
 FLAG_SPINDLE  = 0x08000000
 FLAG_CMD_MOVE = 0x04000000
 FLAG_TOOLBTN  = 0x02000000
+FLAG_NC_READY = 0x00800000
 FLAG_MOVING   = 0x00400000
 FLAG_BUSY     = 0x00002000
 FLAG_ERROR    = 0x00001000
@@ -274,8 +280,7 @@ class MDX40A:
         """SET 0x1109 operation bracket (RE: FUN_0041c410).
 
         VPanel sends 0x00 before any interactive operation (jog, detect jig, move-to)
-        and 0xff after. Hypothesis: releases the firmware parking brake / enables
-        servo drive for remote commands.
+        and 0xff after.
         """
         payload = b'\x00' if active else b'\xff'
         try:
@@ -337,6 +342,20 @@ class MDX40A:
         """
         p = self._last_ping_word
         return p is not None and (p & _PING_BUSY_MASK) != 0
+
+    def has_device_error(self) -> bool:
+        """Fresh-read the ping word and return True if the firmware error bit
+        (bit 20, `_PING_ERROR_MASK`) is set.
+
+        Forces a GET 0x0001 — does NOT consult the cache — because the caller
+        wants the *current* error state, not whatever the last poll() saw. Used
+        by CutJob to surface firmware-side rejection of an NC payload at the
+        per-tick boundary.
+
+        Returns False on USB error (treat unknown as 'no error').
+        """
+        p = self._ping_status()
+        return p is not None and (p & _PING_ERROR_MASK) != 0
 
     def stop_motion(self) -> None:
         """Send immediate motion stop (SET wValue=0x03f3)."""
@@ -488,6 +507,8 @@ class MDX40A:
         """
         try:
             data = _usb.trigger_read_b(self._dev, 0x2405, 16)
+            if data is None or len(data) < 16:
+                return None
             vals = struct.unpack('>IIHHHxx', data)
             # log.info(f"GET 0x2405 data {vals}")
             seconds = vals[0]
@@ -901,6 +922,74 @@ class MDX40A:
             log.warning("get_firmware_id failed: %s", e)
             return None
 
+    def _query_axis_config(self) -> Optional[bytes]:
+        """Read the raw 6-byte machine-config struct (Pattern B, GET 0x3106).
+
+        RE: query_0x3106_6bytes @ 0x0041a350 → dev_trigger_read(0x3106, buf, 6).
+        Byte[1] is the nc_rml_flags command-set selector — see query_command_set.
+        Internal helper; pair with SET 0x3107 (send_axis_config) to write back.
+        """
+        try:
+            data = _usb.trigger_read_b(self._dev, 0x3106, 6)
+            if data is None or len(data) < 6:
+                log.warning("_query_axis_config: short/no response (%s)",
+                            None if data is None else len(data))
+                return None
+            return bytes(data[:6])
+        except (usb.core.USBError, ValueError) as e:
+            log.warning("_query_axis_config failed: %s", e)
+            return None
+
+    # Command-set selector values (byte[1] of GET 0x3106 / SET 0x3107).
+    # RE: Setup dialog radio buttons (control IDs 0xFD3/0xFD4/0xFD5), bound via
+    # MFC DDX_Radio so the radio index (0/1/2 from top) maps to nc_rml_flags.
+    # The enable-check at FUN_00402af0 confirms valid range is 0..2.
+    CMDSET_RML1 = 0   # "RML-1"
+    CMDSET_NC   = 1   # "NC Code"
+    CMDSET_AUTO = 2   # "Selected automatically (RML-1/NC Code)" — sniffs first byte
+
+    def query_command_set(self) -> Optional[int]:
+        """Query firmware command-set mode — byte[1] of GET 0x3106.
+
+        Returns one of CMDSET_RML1 (0), CMDSET_NC (1), CMDSET_AUTO (2),
+        or None on USB error. See set_command_set() for the value meanings.
+        """
+        cfg = self._query_axis_config()
+        return None if cfg is None else cfg[1]
+
+    def set_command_set(self, mode: int) -> bool:
+        """Switch firmware command-set mode (read-modify-write of 6-byte config).
+
+        RE: write_ncode_settings @ 0x00402a20 — reads the 6-byte config via
+        query_0x3106, updates byte[1] (nc_rml_flags), and writes back via
+        send_axis_config_0x3107, which polls ping bit 21 clear after.
+
+        mode:
+            0 (CMDSET_RML1) — RML-1 only; G-code blocks are silently dropped.
+            1 (CMDSET_NC)   — NC Code only; RML-1 bytes are dropped.
+            2 (CMDSET_AUTO) — Auto-detect; firmware picks based on first byte
+                              (`%` or `(` → NC, otherwise RML-1).
+
+        Returns True on firmware ack (or no-op if already in requested mode).
+        """
+        if mode not in (0, 1, 2):
+            raise ValueError(f"mode must be 0/1/2 (RML/NC/AUTO); got {mode}")
+        cfg = self._query_axis_config()
+        if cfg is None:
+            log.warning("set_command_set: could not read current config")
+            return False
+        if cfg[1] == mode:
+            log.info("set_command_set: already in mode %d, no write needed", mode)
+            return True
+        new_cfg = bytes([cfg[0], mode]) + cfg[2:6]
+        try:
+            _usb.vend_set(self._dev, 0x3107, new_cfg)
+            log.info("set_command_set: SET 0x3107  %s → %s", cfg.hex(), new_cfg.hex())
+        except usb.core.USBError as e:
+            log.warning("set_command_set: SET 0x3107 failed: %s", e)
+            return False
+        return self._wait_ping_bit21()
+
     def get_rotary_axis_centreline(self) -> Optional[tuple]:
         """Read stored rotary A-axis centreline from firmware (Pattern B, GET 0x3801).
 
@@ -1018,8 +1107,7 @@ class MDX40A:
         # USB printer class GET_DEVICE_ID (bmRequestType=0xA1, bRequest=0x00).
         # On Windows, USBPRINT.SYS sends this automatically during device
         # enumeration — before VPanel ever opens the handle. On macOS with
-        # libusb it is never sent. The machine firmware may require it to
-        # transition from standalone mode to remote-control mode.
+        # libusb it is never sent.
         try:
             data = dev.ctrl_transfer(0xA1, 0x00, 0x0000, self._intf_num, 1024, timeout=2000)
             log.info("GET_DEVICE_ID (%d bytes): %s",
@@ -1028,7 +1116,7 @@ class MDX40A:
             log.debug("GET_DEVICE_ID not supported or failed: %s", e)
 
         # USB printer class SOFT_RESET (bmRequestType=0x21, bRequest=0x02).
-        # USBPRINT may send this when first opening the port. Harmless if unsupported.
+        # USBPRINT may send this when first opening the port.
         try:
             dev.ctrl_transfer(0x21, 0x02, 0x0000, self._intf_num, 0, timeout=2000)
             log.info("SOFT_RESET sent")
@@ -1140,20 +1228,25 @@ class MDX40A:
         self._set_operation_mode(False)
 
     def bulk_write(self, data: bytes) -> int:
-        """Write raw bytes to the bulk-OUT endpoint (NC/RML command stream)."""
+        log.info(f"Sending bulk write {data}")
+        """Pass through raw bytes to the bulk-OUT endpoint (NC/RML command stream)."""
         return _usb.bulk_write(self._dev, data)
 
     def get_nc_bytes_processed(self) -> int:
-        """Read NC bytes-processed counter (Pattern B, wValue=0x0200).
+        """Read NC bytes-processed counter — direct vendor-IN GET at wValue=0x0200,
+        4 bytes BE. The firmware increments this counter as it consumes bytes
+        from its internal NC buffer.
 
-        RE: get_coord_pair_0x200 @ 0x0041c290 — SET 0x0200 → GET 0x0003, 4 bytes BE.
-        Firmware increments this as it consumes NC data from its internal buffer.
-        Returns unsigned 32-bit counter, or -1 on error.
+        RE: get_nc_bytes_processed_0x200 @ 0x0041c290 issues ONE vtable call
+        (read_status_op @ amc_lock_vtable+0x18) with (wValue=0x200, buf, len=4)
+        and treats len==4 as success.
+
+        Returns unsigned 32-bit counter, or -1 on USB error / short read.
         """
         try:
-            data = _usb.trigger_read(self._dev, 0x0200, 4)
-            if data and len(data) >= 4:
-                return struct.unpack('>I', bytes(data[:4]))[0]
+            data = _usb.vend_get(self._dev, 0x0200, 4)
+            if len(data) >= 4:
+                return struct.unpack_from('>I', data, 0)[0]
         except usb.core.USBError as e:
             log.debug("get_nc_bytes_processed failed: %s", e)
         return -1

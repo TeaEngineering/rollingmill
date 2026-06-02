@@ -26,10 +26,12 @@ from .machine import FLAG_STATE_SHIFT, STATE_MAP
 
 # ── Flag bit table (mirrors machine.py FLAG_* constants) ─────────────────────
 _FLAG_BITS = {
+    30: 'VIEW_LED',
     28: 'DOOR',
     27: 'SPINDLE',
     26: 'CMD_MOVE',
     25: 'TOOLBTN',
+    23: 'NC_READY',
     22: 'MOVING',
     13: 'BUSY',
     12: 'ERROR',
@@ -60,7 +62,7 @@ KNOWN_WVALUES: dict = {
     0x0101: 'model_string',
     # ── State blocks ─────────────────────────────────────────────────────────
     0x0100: 'state_block',            # GET only; 32 bytes XYZA + flags + RPM
-    0x0200: 'coord_pair',             # GET only; 4-byte position used for step completion
+    0x0200: 'nc_bytes',               # GET only; 4-byte nc_bytes counter
     # ── Motion ───────────────────────────────────────────────────────────────
     0x04f5: 'jog',                    # SET; relative displacement '>HH4i' (spd,0,X,Y,Z,A)
     0x04f6: 'waypoint',               # SET; relative milling waypoint (speed=0xFFFF)
@@ -102,6 +104,7 @@ KNOWN_WVALUES: dict = {
     # ── Axis / machine config ────────────────────────────────────────────────
     0x2012: 'motion_limits',          # SET 2×uint32; waits ping bit21
     0x3107: 'axis_config',            # SET 6 bytes; waits ping bit21
+    0x3106: 'nc_config',
     **{0x347b + i: f'axis_param_{i + 1}' for i in range(8)},  # 0x347b..0x3482
     # unknown
     0x03f2: 'unknown_0x3f2',          # SET possible "resume"

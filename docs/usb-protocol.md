@@ -85,16 +85,16 @@ All status/config queries use Pattern B. The polling step is mandatory — firin
 | `0x3202` | `query_0x3202` | 16 bytes | WCS2 work origin offsets `[XYZA]` |
 | `0x3203`–`0x3208` | `query_axis_params_range` | 16 bytes each | WCS3–8 origins (4×uint32) |
 | `0x3209`–`0x3334` | `query_param_table_range` | 16 bytes each | WCS9–309 entries; see [Coordinate Systems](coordinate-systems.md) |
-| `0x030d` | `query_0x30d` | 16 bytes | Move waypoint lower bound |
-| `0x030e` | `query_0x30e` | 16 bytes | Move waypoint upper bound; `element[3]` (A axis) patched before motion planning |
+| `0x030d` | `query_pos_0x30d` | 16 bytes | Likely XYZA, is queried before jig detect tripple-contact probe  |
+| `0x030e` | `query_pos_0x30e` | 16 bytes | Likely XYZA, is queried before tool height, jig detect, toolsensor pos etc. |
 
 ### Axis configuration / tool offsets
 
 | wValue | Name | Response | Notes |
 |--------|------|----------|-------|
-| `0x3106` | `query_0x3106_6bytes` | 6 bytes | `byte[1]` ∈ {1,2} checked for firmware mode |
+| `0x3106` | `query_0x3106_6bytes` | 6 bytes | Machine-config struct. `byte[1]` is the `nc_rml_flags` command-set selector: `0` = RML-1 only, `1` = NC Code only, `2` = Selected automatically (RML-1/NC). Read-modify-write paired with SET `0x3107`. See [sending-nc-code.md](sending-nc-code.md#command-set-selection-rml-1-vs-nc). |
 | `0x346b`–`0x3472` | `query_indexed_0x346a` (index 1–8) | 4 bytes each | Read tool diameter offsets (8 slots) |
-| `0x3701` | `get_uint32_0x3700` | 4 bytes | Single uint32 |
+| `0x3700` | `get_uint32_0x3700` | 4 bytes | Single int32 - unknown purpose read 0x3700 write 0x3701, related to rotary axis/jig detect |
 | `0x3801` | `get_rotary_axis_centreline_0x3801` | 12 bytes | 3×uint32 = stored rotary A-axis centreline `[X, Y, Z]` in 1/1000 mm. Only `Y, Z` define the line (X is "along" the rotation axis, so its value is informational only). Written by the jig-detect routine via `SET 0x3803`. Read by the "Current Jig" indicator in the main panel — see [rotary-jig-alignment.md](rotary-jig-alignment.md#current-jig-indicator). |
 | `0x3804` | `get_rotary_axis_angle_correction` | 24 bytes | 6 × int32 BE in 1/1000 mm: `[refX1, ofsY1, ofsZ1, refX2, ofsY2, ofsZ2]` — rotary A-axis two-point angle correction. See [machine-calibration.md](machine-calibration.md#rotary-axis-calibration). |
 | `0x3a02` | `get_2uint32_0x3a02` | 8 bytes | 2×uint32 |
@@ -158,7 +158,7 @@ Payload layouts and dispatch detail live in [move-commands.md](move-commands.md)
 
 | wValue | Payload | Notes |
 |--------|---------|-------|
-| `0x3107` | 6 bytes | Set axis configuration; poll ping bit 21 clear after |
+| `0x3107` | 6 bytes — modified `0x3106` struct | `send_axis_config_0x3107` @ `0x0041a370`. Writes back the 6-byte machine-config struct (read via GET `0x3106`); set `byte[1]` to `0-2` to switch command-set mode RML-1/NC/Auto. Poll ping bit 21 clear after. See [sending-nc-code.md](sending-nc-code.md#command-set-selection-rml-1-vs-nc). |
 | `0x347b`–`0x3482` | `>I` — uint32 (index 1–8) | Write tool diameter offsets; poll ping bit 21 clear after each |
 | `0x2012` | 2×uint32 (8 bytes) | Write motion limits pair; poll ping bit 21 clear after |
 | `0x3468` | 1 byte (bool) | Toggle "Optional Block Skip" on/off |
@@ -167,7 +167,7 @@ Payload layouts and dispatch detail live in [move-commands.md](move-commands.md)
 
 | wValue | Payload | Notes |
 |--------|---------|-------|
-| `0x0200` | (trigger) | Prime NC bytes-processed counter read (Pattern B) |
+| `0x0200` | (bare) | Prime NC bytes-processed counter (4 bytes) |
 
 
 ### Uncertain/Unknown

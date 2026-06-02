@@ -12,13 +12,20 @@ once per main-loop tick (~100 ms in the TUI). Typical use::
     job.next_block()          # send block 0 (state → WAITING)
     # main loop calls job.service() each tick; WAITING polls the NC
     # bytes-processed counter and transitions back to STEPPING on ack.
-    job.start_run()           # switch to continuous bulk streaming
+    job.start_run()           # switch to continuous mode (auto next_block after each ack)
+
+Wire model (RE'd from VP_MDX40A — see docs/sending-nc-code.md):
+  - Both step and run mode send ONE block per USB bulk-OUT transfer.
+  - After each block, poll GET 0x0200 until counter == before + len(block).
+  - Run mode auto-advances on ack; step mode parks back in STEPPING.
+  - There is no multi-block chunking on the wire — the firmware's internal
+    NC buffer would overflow.
 
 States:
   IDLE     — constructed but not started
   STEPPING — paused, waiting for next_block()
-  WAITING  — block sent, polling NC bytes-processed counter
-  RUNNING  — streaming file in 32 KB bulk chunks
+  WAITING  — step block sent, polling NC bytes-processed counter (→ STEPPING on ack)
+  RUNNING  — run block sent, polling NC bytes-processed counter (→ next block on ack)
   DONE     — all blocks sent
   ERROR    — USB error or abort()
 """
@@ -29,28 +36,36 @@ from typing import List, Optional
 
 from . import machine as _machine
 
-
 def parse_nc_blocks(data: bytes) -> list:
-    """Split NC/RML file bytes into \\r\\n-terminated line blocks.
+    """Split NC/RML file bytes into delimiter-terminated blocks.
 
-    Mirrors FUN_0040bc92 in VP_MDX40A.exe: scans for CR/LF delimiters,
-    skips empty lines, appends \\r\\n to each block. Returns list[bytes].
+    Faithful to FUN_0040bc92 in VP_MDX40A.exe:
+      - scans for CR or LF;
+      - CRLF is consumed as a single delimiter (LF after CR is eaten);
+      - each block is data[offsets[k]:offsets[k+1]] — i.e. includes its
+        trailing delimiter byte(s) **as they appeared in the source**;
+      - empty lines produce single-byte blocks (just the delimiter);
+      - any trailing data after the final delimiter is the last block,
+        with no synthetic delimiter appended.
+
+    The counter at GET 0x0200 advances by exactly len(block), so any
+    normalisation (e.g. promoting LF → CRLF) would break the expected-vs-
+    actual counter math used by CutJob._service_ack.
     """
-    blocks = []
-    i = start = 0
-    while i < len(data):
+    offsets = [0]
+    i, n = 0, len(data)
+    while i < n:
         c = data[i]
-        if c in (0x0D, 0x0A):
-            line = data[start:i]
-            if line.strip():
-                blocks.append(line + b'\r\n')
-            if c == 0x0D and i + 1 < len(data) and data[i + 1] == 0x0A:
+        if c == 0x0D:                                # CR
+            if i + 1 < n and data[i + 1] == 0x0A:    # CRLF — consume both
                 i += 1
-            start = i + 1
+            offsets.append(i + 1)
+        elif c == 0x0A:                              # bare LF
+            offsets.append(i + 1)
         i += 1
-    tail = data[start:]
-    if tail.strip():
-        blocks.append(tail if tail.endswith(b'\r\n') else tail + b'\r\n')
+    blocks = [data[offsets[k]:offsets[k+1]] for k in range(len(offsets) - 1)]
+    if offsets[-1] < n:                              # tail with no trailing delimiter
+        blocks.append(data[offsets[-1]:])
     return blocks
 
 
@@ -62,8 +77,7 @@ class CutJob:
     DONE     = 'done'
     ERROR    = 'error'
 
-    _CHUNK = 0x8000        # 32 KB — matches VPanel CFile::Read buffer
-    _WAIT_TIMEOUT = 10.0   # seconds to wait for NC counter to advance after a step block
+    _WAIT_TIMEOUT = 60.0   # seconds to wait for NC counter to advance after a block
 
     # ── Construction ──────────────────────────────────────────────────────────
 
@@ -76,24 +90,24 @@ class CutJob:
         self._error: Optional[str] = None
         self._bracket_open = False
 
-        # WAITING — set when a step block is sent.
+        # WAITING / RUNNING — set when a block is sent.
         self._wait_expected: int   = 0
         self._wait_deadline: float = 0.0
 
-        # RUNNING — joined remaining-block payload + write offset.
-        self._payload: bytes           = b''
-        self._payload_start_idx: int   = 0
-        self._offset: int              = 0
+    @classmethod
+    def from_bytes(cls, machine: _machine.MDX40A, data: bytes, filename: str = '') -> 'CutJob':
+        """Parse *data* into blocks and return a CutJob ready to be started."""
+        blocks = parse_nc_blocks(data)
+        if not blocks:
+            raise ValueError(f"No NC blocks found in payload ({len(data)} bytes)")
+        return cls(machine, blocks, filename)
 
     @classmethod
     def from_file(cls, machine: _machine.MDX40A, path: str) -> 'CutJob':
         """Read *path*, parse into blocks, return a CutJob ready to be started."""
         with open(path, 'rb') as fh:
             data = fh.read()
-        blocks = parse_nc_blocks(data)
-        if not blocks:
-            raise ValueError(f"No NC blocks found in {path!r}")
-        return cls(machine, blocks, os.path.basename(path))
+        return cls.from_bytes(machine, data, os.path.basename(path))
 
     # ── Read-only status ──────────────────────────────────────────────────────
 
@@ -126,26 +140,34 @@ class CutJob:
     # ── Control ───────────────────────────────────────────────────────────────
 
     def start_step(self) -> None:
-        """Arm or switch to step mode (pause before each block)."""
+        """Arm or switch to step mode (pause before each block).
+
+        If a run-mode block is currently in flight (RUNNING), the in-flight
+        block still completes; on its ack the job parks in STEPPING instead
+        of auto-sending the next block.
+        """
         if self._state in (self.DONE, self.ERROR):
             return
         if self._state == self.RUNNING:
-            self._idx = self._idx_from_offset()
-        self._state = self.STEPPING
+            self._state = self.WAITING   # finish current block, then park.
+        elif self._state != self.WAITING:
+            self._state = self.STEPPING
 
     def start_run(self) -> None:
-        """Switch to continuous bulk streaming from the current block."""
+        """Switch to continuous mode: send one block per tick, gated by the
+        NC bytes-processed counter (RE'd from VP_MDX40A nc_send_one_slice loop).
+        """
         if self._state in (self.DONE, self.ERROR):
             return
         if self._idx >= len(self._blocks):
             self._state = self.DONE
             self._close_bracket()
             return
-        self._ensure_bracket()
-        self._payload           = b''.join(self._blocks[self._idx:])
-        self._payload_start_idx = self._idx
-        self._offset            = 0
-        self._state             = self.RUNNING
+        if self._state == self.WAITING:
+            # A step block is still acking — promote it so on ack we auto-advance.
+            self._state = self.RUNNING
+            return
+        self._send_block(run_mode=True)
 
     def next_block(self) -> None:
         """Send the next block (step mode). STEPPING → WAITING."""
@@ -155,29 +177,12 @@ class CutJob:
             self._state = self.DONE
             self._close_bracket()
             return
-        block = self._blocks[self._idx]
-        try:
-            self._ensure_bracket()
-            before = self._m.get_nc_bytes_processed()
-            self._m.bulk_write(block)
-            if before >= 0:
-                self._wait_expected = (before + len(block)) & 0xFFFFFFFF
-                self._wait_deadline = time.monotonic() + self._WAIT_TIMEOUT
-                self._state         = self.WAITING
-            else:
-                # Counter read failed (e.g. mock mode); skip the wait and advance.
-                self._idx += 1
-                if self._idx >= len(self._blocks):
-                    self._state = self.DONE
-                    self._close_bracket()
-        except Exception as exc:
-            self._set_error(str(exc))
+        self._send_block(run_mode=False)
 
     def pause(self) -> None:
-        """Switch from run to step mode at the next chunk boundary."""
+        """Pause run mode: stop auto-advancing after the in-flight block acks."""
         if self._state == self.RUNNING:
-            self._idx   = self._idx_from_offset()
-            self._state = self.STEPPING
+            self._state = self.WAITING   # on ack, _service_ack parks in STEPPING.
 
     def abort(self) -> None:
         """Stop immediately and enter ERROR state."""
@@ -189,40 +194,35 @@ class CutJob:
 
     def service(self) -> None:
         """Advance the state machine by one step. Call once per main-loop tick."""
-        st = self._state
-        if st == self.RUNNING:
-            self._service_running()
-        elif st == self.WAITING:
-            self._service_waiting()
+        if self._state == self.RUNNING:
+            self._service_ack(run_mode=True)
+        elif self._state == self.WAITING:
+            self._service_ack(run_mode=False)
         # IDLE / STEPPING / DONE / ERROR: nothing to do
 
-    def _service_running(self) -> None:
-        if self._offset >= len(self._payload):
-            self._idx   = len(self._blocks)
-            self._state = self.DONE
-            self._close_bracket()
-            return
-        try:
-            chunk = self._payload[self._offset:self._offset + self._CHUNK]
-            self._m.bulk_write(chunk)
-            self._offset += len(chunk)
-            self._idx     = self._idx_from_offset()
-            if self._offset >= len(self._payload):
-                self._idx   = len(self._blocks)
-                self._state = self.DONE
-                self._close_bracket()
-        except Exception as exc:
-            self._set_error(str(exc))
-
-    def _service_waiting(self) -> None:
+    def _service_ack(self, run_mode: bool) -> None:
         v = self._m.get_nc_bytes_processed()
         if v >= 0 and v == self._wait_expected:
             self._idx += 1
             if self._idx >= len(self._blocks):
                 self._state = self.DONE
                 self._close_bracket()
+            elif run_mode:
+                self._send_block(run_mode=True)   # auto-advance: stay in RUNNING
             else:
                 self._state = self.STEPPING
+            return
+        # Counter not yet at expected — check if the firmware has flagged an
+        # error (e.g. illegal block, wrong command-set mode). The error bit
+        # (ping bit 20) stays set until power-cycled, so polling per-tick
+        # surfaces the rejection at the offending block rather than after the
+        # 10-second WAIT_TIMEOUT.
+        if self._m.has_device_error():
+            block_text = self.line_at(self._idx)
+            self._set_error(
+                f"firmware error bit set after block {self._idx} ({block_text!r}); "
+                f"counter at {v}, expected {self._wait_expected}"
+            )
             return
         if time.monotonic() > self._wait_deadline:
             self._set_error(
@@ -230,6 +230,26 @@ class CutJob:
             )
 
     # ── Internal helpers ──────────────────────────────────────────────────────
+
+    def _send_block(self, run_mode: bool) -> None:
+        """Send self._blocks[self._idx] and enter WAITING/RUNNING.
+
+        _idx stays put until _service_ack sees counter == expected; only then
+        does it increment (matching VPanel's nc_send_one_slice + counter-poll loop).
+        """
+        block = self._blocks[self._idx]
+        try:
+            self._ensure_bracket()
+            before = self._m.get_nc_bytes_processed()
+            if before < 0:
+                self._set_error("get_nc_bytes_processed failed before bulk_write")
+                return
+            self._m.bulk_write(block)
+            self._wait_expected = (before + len(block)) & 0xFFFFFFFF
+            self._wait_deadline = time.monotonic() + self._WAIT_TIMEOUT
+            self._state         = self.RUNNING if run_mode else self.WAITING
+        except Exception as exc:
+            self._set_error(str(exc))
 
     def _ensure_bracket(self) -> None:
         if not self._bracket_open:
@@ -246,15 +266,3 @@ class CutJob:
         self._state = self.ERROR
         self._close_bracket()
 
-    def _idx_from_offset(self) -> int:
-        """Index of the first block whose end is past the current write offset.
-
-        Used when pausing mid-stream so next_block() resumes at the block
-        enclosing the current offset (matching VPanel's behaviour).
-        """
-        acc = 0
-        for i, blk in enumerate(self._blocks[self._payload_start_idx:]):
-            acc += len(blk)
-            if acc > self._offset:
-                return self._payload_start_idx + i
-        return len(self._blocks)
