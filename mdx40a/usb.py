@@ -184,17 +184,28 @@ class MdxMockUSB:
     """In-process mock that implements the `MdxLink` interface without
     touching real USB. Transfers short-circuit:
 
-      - vend_set: no-op.
-      - vend_get: zero-filled buffer. Special cases:
+      - vend_set: no-op except it caches the wValue so a following
+          vend_get(0x0003, …) can replay the matching fake (Pattern B).
+      - vend_get: zero-filled buffer by default. Special cases:
           wValue=0x0002 → b'\\x00\\x00\\x12\\x34' (endian sig — MDX40A handshake check).
           wValue=0x0001 → b'\\x00\\x00\\x00\\xff' (ping: byte[3]=0xff means
               "response of length 255 is ready"). Allows `MDX40A.pattern_b_read`
               to terminate immediately when running against the mock —
               otherwise the polling loop would spin until poll_timeout.
+          wValue=0x0003 → replays the `responses` entry keyed by the last SET
+              wValue (Pattern B response stage).
+          any other wValue → replays the `responses` entry for that wValue
+              (direct GET, e.g. 0x0100 state block, 0x0200 NC counter).
       - bulk_write: returns len(data).
+
+    Pass a `responses` dict to inject fakes for specific reads, e.g.
+        MdxMockUSB(responses={0x0100: state_block_bytes})
+    Unset entries return all-zero buffers of the requested length.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, responses: Optional[dict] = None) -> None:
+        self._responses = dict(responses or {})
+        self._last_set_wvalue: int = -1
         log.info("MdxMockUSB created")
 
     # ── Lifecycle ────────────────────────────────────────────────────────────
@@ -211,7 +222,7 @@ class MdxMockUSB:
     # ── Transfer primitives ──────────────────────────────────────────────────
 
     def vend_set(self, wValue: int, data: bytes = b"") -> None:
-        pass
+        self._last_set_wvalue = wValue
 
     def vend_get(self, wValue: int, length: int) -> bytes:
         if wValue == 0x0002:
@@ -219,7 +230,11 @@ class MdxMockUSB:
         if wValue == 0x0001 and length >= 4:
             # Ping: byte[3]=0xff = "max response ready" so MDX40A.pattern_b_read exits the loop.
             return b"\x00\x00\x00\xff"
-        return bytes(length)
+        if wValue == 0x0003:
+            buf = self._responses.get(self._last_set_wvalue, b"")
+        else:
+            buf = self._responses.get(wValue, b"")
+        return (buf + b"\x00" * length)[:length]
 
     def bulk_write(self, data: bytes) -> int:
         return len(data)
