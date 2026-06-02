@@ -399,11 +399,7 @@ class TUI:
     def _adjust_overrides(self, delta: int) -> None:
         """Adjust spindle speed % and cutting feed % together (+/- keys)."""
         pct = max(10, min(200, self._m.spindle_speed_pct + delta))
-        s = self._m.state
-        if s.flags & FLAG_SPINDLE:
-            self._m.set_spindle_speed(pct)
-        else:
-            self._m.set_spindle_speed_cached(pct)
+        self._m.set_spindle_override(pct)
         self._m.set_cutting_feed(pct)
         self.annotate(f"KEY +-  override_pct={pct}")
 
