@@ -2,7 +2,7 @@
 
 The MDX-40A is installed as a Windows printer (Class=Printer), not a raw USB HID or WinUSB device. VPanel uses USB vendor control transfers (EP0) for machine state, jog, and configuration; NC/RML file data flows through the Windows printer stack to USB bulk-OUT.
 
-The key components are:
+The key components diss-assembled were:
 
 | File          | Role                                             | sha256 |
 |---------------|--------------------------------------------------|-------------------
@@ -24,8 +24,16 @@ RollingMill:
 
     Our app → libusb bulk_write() → USB bulk-out
 
-We skip the entire printer stack.
 
+Within the USB vendor control transfers, there are immediate reads (Pattern A), deferred reads (Pattern B - where the data becomes available in a later transfer), and configuration writes that then require polling a status bit to confirm the write operation completes.
+
+**Two transfer patterns:**
+- Read Pattern A — direct `GET wValue` (e.g. coordinates via `0x0100`)
+- Read Pattern B — `SET wValue` trigger, then poll ping bit, then `GET 0x0003` for response data
+- Write Pattern - `SET wValue`, then poll for acknowledge.
+- Write Pattern - `SET wValue`, no follow up (e.g. motion stop).
+
+**Byte order:** All multi-byte device values are big-endian. Flag fields are considered byte fields and not swapped. 
 
 
 ## Protocol Reference
@@ -44,17 +52,6 @@ We skip the entire printer stack.
 | [Coordinate Systems, Move To, and Origins](coordinate-systems.md) | WCS slots, display math, Move-To modes, Set Origin commands, VIEW position vs WCS origin |
 | [Rotary Jig Alignment](rotary-jig-alignment.md) | A-axis calibration rod routine, "Current Jig" indicator, centreline equality check |
 | [Tool Diameter Offsets](tool-diameter-offsets.md) | Storage and USB commands for 8-slot tool diameter offset table |
-| [Tool Sensor Calibration](tool-sensor-calibration.md) | Refines the XY centre of the Z-height sensor pad |
+| [Tool Sensor Calibration](tool-sensor-calibration.md) | Refines the XY centre of the Z-height sensor pad on the rotary axis |
 
----
 
-## Key Findings at a Glance
-
-**Transport:** All machine control uses USB vendor control transfers (bRequest=0x01). NC/RML file
-data uses the bulk-OUT endpoint. There is no framing on the bulk channel — raw bytes only.
-
-**Two transfer patterns:**
-- Pattern A — direct `GET wValue` (e.g. coordinates via `0x0100`)
-- Pattern B — `SET wValue` trigger then poll ping, then `GET 0x0003` for response data
-
-**Byte order:** All multi-byte device values are big-endian.

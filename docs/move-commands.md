@@ -36,13 +36,18 @@ bytes 4–5   uint16  speed        (mm/min; 0xFFFF = firmware max, what VPanel a
 
 ### `wcs_code` — mirrors the Coordinate-System dropdown's item-data
 
-| Value | WCS slot |
-|-------|----------|
-| `0` | MCS (machine coordinates — origin = `(0,0,0,0)`) |
-| `1` | WCS1 |
-| `2` | EXOFS (the secondary G54-style offset shown as "EXOFS" in the dropdown) |
-| `3`..`9` | WCS3..WCS9 |
-| `10`..`309` | Extended WCS slots (not exposed in the standard dropdown) |
+
+| Dropdown value                | ID | Notes                  |
+|-------------------------------|----|------------------------|
+| Machine Coordinate System     | 0  | Fixed origin (0,0,0,0) |
+| User Coordinate System        | 1  | RML mode only          |
+| G54                           | 3  | +EXOFS, NC mode only   |
+| G55                           | 4  | +EXOFS, NC mode only   |
+| G56                           | 5  | +EXOFS, NC mode only   |
+| G57                           | 6  | +EXOFS, NC mode only   |
+| G58                           | 7  | +EXOFS, NC mode only   |
+| G59                           | 8  | +EXOFS, NC mode only   |
+| EXOFS                         | 2  | NC mode only           |
 
 ### `axis_mask` — bitfield, multiple bits = simultaneous move
 
