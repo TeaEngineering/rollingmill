@@ -25,9 +25,9 @@ RollingMill:
     Our app → libusb bulk_write() → USB bulk-out
 
 
-Within the USB vendor control transfers, there are immediate reads (Pattern A), deferred reads (Pattern B - where the data becomes available in a later transfer), and configuration writes that then require polling a status bit to confirm the write operation completes.
+Within the USB vendor control transfers, there are immediate reads (Pattern A), deferred reads (Pattern B - where the data becomes available in a later transfer), and configuration writes that, optionally require polling a status bit to confirm the write operation completes.
 
-**Two transfer patterns:**
+**Four transfer patterns:**
 - Read Pattern A — direct `GET wValue` (e.g. coordinates via `0x0100`)
 - Read Pattern B — `SET wValue` trigger, then poll ping bit, then `GET 0x0003` for response data
 - Write Pattern - `SET wValue`, then poll for acknowledge.

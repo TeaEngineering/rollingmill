@@ -125,6 +125,32 @@ FLAG_STATE_SHIFT = 16
 
 STATE_MAP = {0: 'init', 1: 'homing', 2: 'idle', 3: 'moving', 4: 'error'}
 
+# ── Error status codes (Pattern B GET 0x2100) ────────────────────────────────
+#
+# RE: show_error_dialog_0x2100 @ 0x00416d40 dispatches on the uint16 returned
+# by read_error_status_0x2100 (@ 0x004033e0) and loads a per-code string via
+# CString::LoadStringReferenceRsrc. The codes below are exhaustive — codes not
+# in this dict get the generic fallback in `MDX40A.error_message`. Strings are
+# the en-US (LCID 0x0409) PE STRINGTABLE entries.
+MDX_ERROR_MESSAGES: dict = {
+    0x004: "The connector for the rotary axis unit is detached.",
+    0x005: "An unknown error occurred in the spindle control firmware.",
+    0x105: "The spindle motor is not connected.",
+    0x107: "X-Limit switch not found.",
+    0x109: "Cover opened during operation.",
+    0x207: "Y-Limit switch not found.",
+    0x208: "The NVRAM could not be accessed.",
+    0x305: "The spindle control circuit is running hot.",
+    0x307: "Z-Limit switch not found.",
+    0x405: "The spindle motor is running hot.",
+    0x407: "A-Limit switch not found.",
+    0x408: "The NVRAM could not be accessed.",
+    0x605: "The spindle motor experienced excessive current.",
+    0x707: "The Z motor experienced an excessive load.",
+    0xb05: "A communication error occurred in the spindle control firmware.",
+    0xd05: "Spindle rotation is impossible because voltage is too low.",
+}
+
 @dataclass
 class MachineState:
     flags:       int   = 0
@@ -216,9 +242,21 @@ class MDX40A:
           - _ping_status() : GET 0x0001, caches uint32 on self._last_ping_word.
             The ping word drives jog-end detection (TUI consults self.is_busy,
             which derives from the cached value).
+
+        On the rising edge of ping bit 20 (the firmware error flag) the poll
+        reads the error status register and logs the decoded message at
+        WARNING. Edge state lives in `_last_ping_word` itself — snapshot
+        before `_ping_status()`, compare after. Mirrors VPanel's
+        polling_update_state_and_push_UI → state-change dispatcher path,
+        which auto-pops the error dialog on the same transition.
         """
         s = self._read_state()
+        prev_ping = self._last_ping_word
         self._ping_status()
+        prev_err = prev_ping is not None and (prev_ping & _PING_ERROR_MASK) != 0
+        curr_err = self._last_ping_word is not None and (self._last_ping_word & _PING_ERROR_MASK) != 0
+        if curr_err and not prev_err:
+            log.warning("Device error: %s", self.error_message(self.read_error_status()))
         machine_idle = s is not None and s.idle
         now = time.monotonic()
         if machine_idle and now - self._spindle_last_read_at >= self._SPINDLE_POLL_INTERVAL:
@@ -342,9 +380,52 @@ class MDX40A:
         p = self._ping_status()
         return p is not None and (p & _PING_ERROR_MASK) != 0
 
+    def read_error_status(self) -> Optional[int]:
+        """Read the firmware's current error status code (Pattern B, GET 0x2100).
+
+        RE: read_error_status_0x2100 @ 0x004033e0 →
+            get_uint16arr_0x2100 @ 0x0041c600 (Pattern B trigger + dev_read_response
+            + byteswap_u16_array, count=5).
+
+        The wire format is 5 × uint16 big-endian. VPanel returns local_c[1] —
+        the SECOND uint16 — to its caller (the first is some header /
+        sequence field that show_error_dialog never reads). Use this code
+        as the key into `MDX_ERROR_MESSAGES`.
+
+        Returns the 16-bit error code, or None on USB / short response. Note
+        that VPanel substitutes 0xFFFF on internal failure; we expose None
+        instead so the distinction between "no response" and "real code 0xFFFF"
+        is preserved.
+        """
+        try:
+            # check_error=False — we explicitly want to read while the error
+            # bit is up; that's the only time this register is meaningful.
+            data = self.pattern_b_read(0x2100, 10, check_error=False)
+            if data is None or len(data) < 4:
+                log.warning("read_error_status: short/no response")
+                return None
+            # Two BE uint16s — header and code. show_error_dialog only uses index 1.
+            _hdr, code = struct.unpack_from('>2H', bytes(data))
+            return code
+        except (usb.core.USBError, ValueError) as e:
+            log.warning("read_error_status failed: %s", e)
+            return None
+
+    @staticmethod
+    def error_message(code: Optional[int]) -> str:
+        """Translate a code returned by read_error_status() into a human-readable
+        message, matching show_error_dialog_0x2100's lookup. Unknown codes get a
+        generic prefix; the hex value is appended in all cases so the raw code
+        is visible in logs even when the message is the generic fallback."""
+        if code is None:
+            return "Unknown error (no code read)"
+        text = MDX_ERROR_MESSAGES.get(code, "Unknown error")
+        return f"{text} (0x{code:04x})"
+
     def pattern_b_read(
         self, wValue: int, max_length: int,
         poll_timeout: float = 1.0,
+        check_error: bool = True,
     ) -> bytes:
         """Pattern B read (RE: dev_trigger_read @ 0x0041bb90).
 
@@ -352,7 +433,11 @@ class MDX40A:
         non-zero (= firmware-reported response length) → GET 0x0003 of that
         many bytes.
 
-        Raises ValueError on device-error bit or read timeout.
+        Raises ValueError on read timeout, and on the device-error bit
+        (ping bit 20) when `check_error` is True. Pass `check_error=False`
+        for reads whose purpose is to inspect the error condition itself
+        (e.g. GET 0x2100 — the error status register), so the lookup can
+        complete instead of short-circuiting.
         """
         link = self._link
         link.vend_set(wValue, b"")
@@ -360,7 +445,7 @@ class MDX40A:
         while time.monotonic() < deadline:
             ping = link.vend_get(0x0001, 4)
             if len(ping) >= 4:
-                if ping[2] & 0x10:   # bit 20 = device error
+                if check_error and (ping[2] & 0x10):   # bit 20 = device error
                     raise ValueError("Machine has device error bit set")
                 length = min(ping[3], max_length)
                 if length:
@@ -1223,7 +1308,11 @@ class MDX40A:
                             log.debug(f"GET 0x{wv:0x} spindle live speed {self._spindle_live_speed}")
                         else:
                             log.debug(f"GET 0x{wv:0x} returned: {raw}")
-                except usb.core.USBError as e:
+                except (usb.core.USBError, ValueError) as e:
+                    # ValueError covers pattern_b_read's "device error bit set"
+                    # raise: when the firmware error flag is up, the secondary
+                    # status reads are unavailable but poll() should still
+                    # complete so the error-edge logger can fire.
                     log.debug("Poll read 0x%04x failed: %s", wv, e)
 
             data = self._link.vend_get(0x0100, 32)

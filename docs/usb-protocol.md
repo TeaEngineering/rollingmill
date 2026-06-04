@@ -58,9 +58,9 @@ All status/config queries use Pattern B. The polling step is mandatory — firin
 |--------|------|----------|-------|
 | `0x2001` | `trigger_read_0x2001` | variable | Status flags byte; bit 2 and bit 3 have distinct meanings |
 | `0x2010` | `get_uint32_0x2010` | 4 bytes | Single uint32 status |
-| `0x2100` | `get_uint16arr_0x2100` | variable | Array of uint16 values (byte-swapped) |
+| `0x2100` | `get_extended_error_code_0x2100` | variable, up to 5x uint16 | Fetch extended informaiton about an error condition (byte-swapped) |
 | `0x3800` | `get_rotary_extension_byte_0x3800` | 1 byte | Extension port / rotary status — polled every 200 ms. Cached in `AutoClass33.is_rotary_axis_installed`. See [machine-state.md](machine-state.md#get-0x3800--extension-port--rotary-status) for value meanings. |
-| `0x3b01` | `query_0x3b01_var` | 4 bytes | Variable-length read; used for poll timer sync |
+| `0x3b01` | `query_0x3b01_var` | 4 bytes | Queried by polling loop, unknown purpose |
 
 ### Speed / feed
 
