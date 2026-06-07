@@ -51,6 +51,15 @@ Gotchas/Notes using the mill
 * Be warned that bad, terrible things could happen driving your hardware with this experimental software, due to known or unknown bugs or defects, for which you entirely agree to take all risks in operating and hold the contributors blameless.
 
 
+MDX GCode Intepreter Notes
+----
+* G-codes must be two digits (`G01`, `G00` etc)
+* Dont forget to turn the spindle on (Sxxxx M03) otherwise the machine will fault on the first `G01` operation
+* Ensure all `XYZ` values have a decimal point, and no more than 3 digits of precision
+* Feed rates need a decimal point too
+
+
+
 ZCL-40A 4th Axis
 ----
 When this unit is installed, the X-, Y-, and Z-axis travel of the MDX-40A is reduced:
@@ -63,3 +72,25 @@ When this unit is installed, the X-, Y-, and Z-axis travel of the MDX-40A is red
 | A    | —           | 0 → 360° (continuous)  |
 
 These limits are enforced in firmware, including from the physical jog controls on the machine itself. The X-restriction clears the rotary axis body, but not the rotary vice or tailstock, so care is needed.
+
+
+Engraving text
+-----
+
+`utils/text_to_gcode.py` renders a text string to a single-line g-code file using a QCAD-format `.cxf` stroke font. The output is plain RS-274 with `G2`/`G3` arcs and is intended to be streamed via the TUI's `--file` flow.
+
+```
+python utils/text_to_gcode.py \
+    --text "PART-001" \
+    --out /tmp/label.gcode \
+    --height 8 \
+    --z-cut -0.1 --z-safe 2 \
+    --feed 200 \
+    --workspace G54
+```
+
+`--workspace G54..G59` is optional; when set, the matching WCS-select word is emitted in the header so the cut runs against that work-offset.
+
+Then load on the machine: `rollingmill --file /tmp/label.gcode`.
+
+The default font is `fonts/romans.cxf` (Hershey Roman Simplex, public domain). Override with `--font /path/to/font.cxf`. See `fonts/LICENSE.txt` for font attribution.

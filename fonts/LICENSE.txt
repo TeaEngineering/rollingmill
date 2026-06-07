@@ -1,0 +1,26 @@
+Vendored single-line (stroke) fonts in this directory
+======================================================
+
+romans.cxf
+----------
+Name:       Roman Simplex
+Origin:     Hershey Fonts (NIST / Dr. A. V. Hershey)
+Format:     QCad II CXF (converted from GRASS via Adam Radlowski's "dodajf"
+            by Ain Vagula <vagula@uninet.ee>)
+License:    Public domain (Hershey distribution)
+
+Use restriction (from the original Hershey distribution):
+
+    This distribution of the Hershey Fonts may be used by anyone for any
+    purpose, commercial or otherwise, providing that:
+      1. The following acknowledgements must be distributed with the font
+         data:
+         - The Hershey Fonts were originally created by Dr. A. V. Hershey
+           while working at the U. S. National Bureau of Standards.
+         - The format of the Font data in this distribution was originally
+           created by James Hurt.
+
+The Hershey vector font data was originally placed in the public domain by
+the U.S. National Bureau of Standards. This file is included as a data
+asset; it is not subject to the project's overall licence and is
+distributed under the terms above.
