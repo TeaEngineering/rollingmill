@@ -77,11 +77,11 @@ These limits are enforced in firmware, including from the physical jog controls 
 Engraving text
 -----
 
-`rollingmill.text_to_gcode` renders a text string to a single-line g-code file using a Hershey stroke font from the `pyhershey` library. Glyphs carry per-character advance-width metrics, so spacing is naturally kerned. The output is plain RS-274 (lines only — no arcs) intended to be streamed via the TUI's `--file` flow.
+`rollingmill.text_to_gcode` renders a text string to a single-line g-code file using a Hershey stroke font from the `pyhershey` library. Glyphs carry per-character advance-width metrics, so spacing is naturally kerned. The output is plain RS-274 intended to be streamed via the TUI's `--file` flow.
 
 ```
 python -m rollingmill.text_to_gcode \
-    --text "PART-001" \
+    --text "RollingMill" \
     --out /tmp/label.gcode \
     --height 8 \
     --z-cut -0.1 --z-safe 2 \
@@ -94,3 +94,23 @@ python -m rollingmill.text_to_gcode \
 Then load on the machine: `rollingmill --file /tmp/label.gcode`.
 
 The default font is `roman_simplex`. List all available fonts with `--list-fonts`; pass any name (e.g. `--font gothic_german_triplex`) to switch. Use `--letter-spacing 1.5` to add (or, with a negative value, remove) extra mm of gap after each glyph's natural advance.
+
+
+Drawing neat spirals
+-----
+
+`rollingmill.spiral` renders a "neat spiral" — mathematically a [hypotrochoid](https://en.wikipedia.org/wiki/Hypotrochoid), the curve traced when a small toothed wheel rolls inside a fixed toothed ring. You give it the two gear tooth counts and a pen-arm length, and it emits a single closed pen-down/pen-up loop scaled to fit your requested overall radius.
+
+```
+python -m rollingmill.spiral \
+    --ring 96 --rotor 52 --pen 30 \
+    --radius 40 --x0 100 --y0 100 \
+    --out /tmp/spiral.gcode \
+    --workspace G54
+```
+
+`--ring R` and `--rotor r` are tooth counts (`R` strictly greater than `r`). `--pen d` is the pen-arm length measured in the *same* tooth-count units as the rotor: `d < r` gives smooth curtate lobes, `d = r` gives a hypocycloid with cusps, `d > r` gives prolate loops. `--radius` is the desired max radial extent of the finished drawing in mm, centred on `(--x0, --y0)`. The curve closes exactly after `2π · r / gcd(R, r)` of the rolling parameter.
+
+The output uses `G02` / `G03` arcs with incremental I/J offsets — each arc is fitted adaptively to the true hypotrochoid, with maximum deviation bounded by `--chord-tol` (default 0.05 mm).
+
+Then load on the machine: `rollingmill --file /tmp/spiral.gcode`.
