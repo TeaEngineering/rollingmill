@@ -22,7 +22,7 @@ https://github.com/user-attachments/assets/d28e8a8f-c5a4-4877-8cd2-d2d479c63437
 
 Reverse Engineering
 ------
-The MDX USB protocol was reverse engineered from the official Windows driver stack using Ghidra analysis and protocol inspection. See [the protocol documentation](docs/). It should be stated that the Roland DG corporation neither authorised or approved of this work.
+The MDX USB protocol was reverse engineered from the official Windows driver stack using Ghidra (and the MCP bridge) and [documented here in this respository](docs/). It should be stated that the Roland DG corporation neither authorised or approved of this work.
 
 The official Windows stack consists of:
 
