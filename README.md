@@ -3,18 +3,17 @@ RollingMill
 
 <img src="logo.png" width="35%" align="left" alt="RollingMill logo">
 
-Open-source USB control stack for Roland DG MDX-series desktop mills.
+Open-source USB control stack for Roland DG MDX-series desktop mills, tested on the MDX-40A.
 
-RollingMill communicates directly with the machine over libusb, replacing both the proprietary Windows kernel driver and the VPanel control application.
+RollingMill communicates directly with the machine over libusb, replacing both the proprietary Windows kernel driver and the VPanel control application. It provides a terminal application that:
 
-The project currently provides:
-
-* Live machine state monitoring
-* Axis position readback
-* Variable speed Jogging
-* Spindle control and Rotary Axis Drilling mode
-* Interactive terminal UI (TUI)
-* Cross-platform support (Linux, macOS, Windows)
+* Shows live machine state read-out
+* Jogs four axes at variable speed, with cancel
+* Moves to stored origins, view position, or arbitrary coordinates
+* Controls spindle speed and rotary-axis drilling
+* Sets workspace origins and tool diameter offsets
+* Streams saved G-code (`.nc` files) to the mill
+* Runs on Linux and macOS
 
 <br clear="all">
 
@@ -101,6 +100,8 @@ MDX GCode Intepreter Notes
 * Feed rates need a decimal point too
 * Machine coordinate moves `G53` must be always given in `G90` absolute programming. Specifying G53 in G91 incremental results in an error.
 
+Check your code using this [online G-code viewer](https://shucksmith.uk/NCviewer/), customised for the MDX G-code varient.
+
 
 ZCL-40A 4th Axis
 ----
@@ -119,7 +120,7 @@ These limits are enforced in firmware, including from the physical jog controls 
 Engraving text
 -----
 
-`rollingmill.text_to_gcode` renders a text string to a single-line g-code file using a Hershey stroke font from the `pyhershey` library. Glyphs carry per-character advance-width metrics, so spacing is naturally kerned. The output is plain RS-274 intended to be streamed via the TUI's `--file` flow.
+`rollingmill.text_to_gcode` renders a text string to a single-line G-code file using a Hershey stroke font from the `pyhershey` library. Glyphs carry per-character advance-width metrics, so spacing is naturally kerned. The output is plain RS-274 intended to be streamed via the TUI's `--file` flow.
 
 ```
 python -m rollingmill.text_to_gcode \
