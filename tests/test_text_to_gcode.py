@@ -1,223 +1,138 @@
-"""Tests for utils/text_to_gcode.py — CXF parser, stroke chaining, g-code emit."""
+"""Tests for rollingmill.text_to_gcode — pyhershey-backed g-code emit."""
 from __future__ import annotations
 
-import math
-import sys
-from pathlib import Path
-
-# utils/ is not part of the package; add it to sys.path for import.
-REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO / "utils"))
-
-import text_to_gcode as t2g  # noqa: E402
+from rollingmill import text_to_gcode as t2g
 
 
-# ---------- parser ----------
+# ---------- font discovery ----------
 
-def test_parse_qcad_form(tmp_path: Path) -> None:
-    cxf = tmp_path / "tiny.cxf"
-    cxf.write_text(
-        "# Format: QCad II Font\n"
-        "# LetterSpacing: 3.0\n"
-        "# WordSpacing: 6.75\n"
-        "\n"
-        "[0041] A\n"
-        "L 0,0,3,9\n"
-        "L 3,9,6,0\n"
-        "L 1,3,5,3\n"
-    )
-    font = t2g.parse_cxf(cxf)
-    assert "A" in font.glyphs
-    a = font.glyphs["A"]
-    assert len(a.primitives) == 3
-    assert isinstance(a.primitives[0], t2g.Line)
-    assert a.primitives[0].x2 == 3 and a.primitives[0].y2 == 9
-    assert font.letter_spacing == 3.0
-    assert font.word_spacing == 6.75
+def test_available_fonts_includes_roman_simplex() -> None:
+    fonts = t2g.available_fonts()
+    assert "roman_simplex" in fonts
+    assert fonts == sorted(fonts)
 
 
-def test_parse_hershey_form(tmp_path: Path) -> None:
-    cxf = tmp_path / "tiny.cxf"
-    cxf.write_text(
-        "# LetterSpacing: 3.0\n"
-        "\n"
-        "[A] 3\n"
-        "L 0,0,3,9\n"
-        "L 3,9,6,0\n"
-        "L 1,3,5,3\n"
-    )
-    font = t2g.parse_cxf(cxf)
-    assert "A" in font.glyphs
-    assert len(font.glyphs["A"].primitives) == 3
-
-
-def test_arc_direction(tmp_path: Path) -> None:
-    cxf = tmp_path / "arcs.cxf"
-    cxf.write_text(
-        "[004F] O\n"
-        "A 5,5,5,0,180\n"
-        "AR 5,5,5,180,360\n"
-    )
-    font = t2g.parse_cxf(cxf)
-    o = font.glyphs["O"]
-    assert isinstance(o.primitives[0], t2g.Arc)
-    assert o.primitives[0].ccw is True
-    assert o.primitives[1].ccw is False
-
-
-# ---------- chaining ----------
-
-def test_chain_two_lines_meeting() -> None:
-    # Two line segments sharing an endpoint should chain into one path.
-    prims = [
-        t2g.Line(0, 0, 1, 0),
-        t2g.Line(1, 0, 1, 1),
-    ]
-    paths = t2g.chain_primitives(prims)
-    assert len(paths) == 1
-    assert len(paths[0]) == 2
-
-
-def test_chain_two_separate_strokes() -> None:
-    # Two pairs of connected lines; the pairs don't touch each other.
-    prims = [
-        t2g.Line(0, 0, 1, 0),  # ↘ pair A
-        t2g.Line(1, 0, 1, 1),  # ↗ pair A — shares (1,0)
-        t2g.Line(5, 0, 6, 0),  # ↘ pair B — disconnected from pair A
-        t2g.Line(6, 0, 6, 1),  # ↗ pair B — shares (6,0)
-    ]
-    paths = t2g.chain_primitives(prims)
-    assert len(paths) == 2
-    assert all(len(p) == 2 for p in paths)
-
-
-def test_chain_letter_O_arcs() -> None:
-    # Two semicircles sharing endpoints should chain into one closed path.
-    top = t2g.Arc(0, 0, 5, 0, 180, ccw=True)     # (5,0) → (-5,0) over the top
-    bot = t2g.Arc(0, 0, 5, 180, 360, ccw=True)   # (-5,0) → (5,0) under the bottom
-    paths = t2g.chain_primitives([top, bot])
-    assert len(paths) == 1
-    assert len(paths[0]) == 2
-
-
-def test_chain_reverses_to_connect() -> None:
-    # Two lines whose orientations don't naturally chain — one must be reversed.
-    prims = [
-        t2g.Line(0, 0, 1, 0),  # ends at (1,0)
-        t2g.Line(2, 0, 1, 0),  # also ends at (1,0); needs reversal
-    ]
-    paths = t2g.chain_primitives(prims)
-    assert len(paths) == 1
-    assert len(paths[0]) == 2
+def test_default_font_is_in_available_list() -> None:
+    assert t2g.DEFAULT_FONT in t2g.available_fonts()
 
 
 # ---------- emit ----------
 
-def _make_font_with_I() -> t2g.Font:
-    font = t2g.Font(name="testfont")
-    font.glyphs["H"] = t2g.Glyph("H", [
-        t2g.Line(0, 0, 0, 9),
-        t2g.Line(6, 0, 6, 9),
-        t2g.Line(0, 4.5, 6, 4.5),
-    ])
-    font.glyphs["I"] = t2g.Glyph("I", [t2g.Line(0, 0, 0, 9)])
-    return font
-
-
-def test_emit_basic_I() -> None:
-    font = _make_font_with_I()
-    out = t2g.emit_gcode("I", font, t2g.GCodeOpts(height_mm=9.0))
+def test_emit_basic_renders_strokes() -> None:
+    out = t2g.emit_gcode("I", "roman_simplex", t2g.GCodeOpts(height_mm=9.0))
     lines = out.strip().splitlines()
-    # Should have header, exactly one pen-up→down→stroke→pen-up cycle, and M30.
     assert any(l.startswith("G21") for l in lines)
     assert any(l.startswith("G90") for l in lines)
     assert "M30" in lines
-    # One plunge `G01 Z` for the single stroke.
-    plunges = [l for l in lines if l.startswith("G01 Z")]
-    assert len(plunges) == 1, plunges
-    # And at least one pen-up Z after (final lift) — plus initial.
+    # At least one plunge for the single stroke; at least one final lift.
+    assert any(l.startswith("G01 Z") for l in lines)
     assert sum(1 for l in lines if l.startswith("G00 Z")) >= 2
 
 
-def test_emit_handles_space_and_unknown() -> None:
-    font = _make_font_with_I()
-    # Space and unknown char should not crash; should produce no strokes.
-    out = t2g.emit_gcode(" ?", font, t2g.GCodeOpts(height_mm=9.0))
+def test_emit_handles_space_and_unsupported() -> None:
+    # Space advances the cursor without strokes; non-printable should not crash.
+    out = t2g.emit_gcode(" \x01A", "roman_simplex", t2g.GCodeOpts(height_mm=9.0))
     assert "M30" in out
-    assert "G01 Z" not in out  # no plunges since no known glyphs
+    # 'A' is supported and should produce a plunge.
+    assert any(l.startswith("G01 Z") for l in out.splitlines())
 
 
-def test_emit_arc_ij_offsets() -> None:
-    # Single CCW quarter arc from (1,0) to (0,1), centred at origin, r=1.
-    font = t2g.Font(name="t")
-    font.glyphs["X"] = t2g.Glyph("X", [
-        t2g.Arc(0, 0, 1, 0, 90, ccw=True),
-    ])
-    # Use cap_height fallback: this font has no H/M/I/A → cap_height=9.0.
-    # Scale at height=9.0 is 1.0, so I/J are the raw offsets.
-    out = t2g.emit_gcode("X", font, t2g.GCodeOpts(height_mm=9.0))
-    arc_lines = [l for l in out.splitlines() if l.startswith("G03 ")]
-    assert len(arc_lines) == 1
-    parts = arc_lines[0].split()
-    # End is (0,1); offset from start (1,0) to centre (0,0) is I=-1, J=0.
-    by = {p[0]: float(p[1:]) for p in parts[1:]}
-    assert math.isclose(by["X"], 0.0, abs_tol=1e-4)
-    assert math.isclose(by["Y"], 1.0, abs_tol=1e-4)
-    assert math.isclose(by["I"], -1.0, abs_tol=1e-4)
-    assert math.isclose(by["J"], 0.0, abs_tol=1e-4)
+def test_emit_newline_advances_y_and_resets_x() -> None:
+    out = t2g.emit_gcode("A\nB", "roman_simplex", t2g.GCodeOpts(height_mm=10.0, x0=0.0, y0=0.0))
+    # After newline, base_y drops by 1.5 × height; some Y values should be negative.
+    ys: list[float] = []
+    for line in out.splitlines():
+        for tok in line.split():
+            if tok.startswith("Y") and len(tok) > 1:
+                try:
+                    ys.append(float(tok[1:]))
+                except ValueError:
+                    pass
+    assert any(y < -1.0 for y in ys), "expected negative Y for second line"
 
 
-def test_emit_spindle_on_and_off() -> None:
-    font = _make_font_with_I()
-    out = t2g.emit_gcode("I", font, t2g.GCodeOpts(height_mm=9.0, spindle_rpm=8000))
+def test_emit_spindle_on_and_off_order() -> None:
+    out = t2g.emit_gcode("I", "roman_simplex", t2g.GCodeOpts(height_mm=9.0, spindle_rpm=8000))
     lines = out.splitlines()
-    # S word and M03 appear in the header, before the first Z move.
     assert "S8000" in lines
     assert "M03" in lines
     assert lines.index("S8000") < lines.index("M03")
     assert lines.index("M03") < lines.index("G00 Z2.0")
-    # M05 stop comes after the last G00 Z move (the lift), before M30.
     assert lines.index("M03") < lines.index("M05") < lines.index("M30")
 
 
 def test_emit_workspace_in_header() -> None:
-    font = _make_font_with_I()
-    out = t2g.emit_gcode("I", font, t2g.GCodeOpts(height_mm=9.0, workspace="G54"))
+    out = t2g.emit_gcode("I", "roman_simplex", t2g.GCodeOpts(height_mm=9.0, workspace="G54"))
     lines = out.splitlines()
-    # G54 should appear once in the header, before the first feed/Z setup.
     assert "G54" in lines
     assert lines.index("G54") < lines.index("G00 Z2.0")
-    # No G94 should be emitted (mill is always mm/min, line is commented out).
     assert not any(l.strip() == "G94" for l in lines)
 
 
 def test_emit_no_workspace_by_default() -> None:
-    font = _make_font_with_I()
-    out = t2g.emit_gcode("I", font, t2g.GCodeOpts(height_mm=9.0))
-    assert not any(l.strip().startswith("G5") and l.strip() != "G54" for l in out.splitlines() if l.strip() in {"G54","G55","G56","G57","G58","G59"})
+    out = t2g.emit_gcode("I", "roman_simplex", t2g.GCodeOpts(height_mm=9.0))
+    wcs = {"G54", "G55", "G56", "G57", "G58", "G59"}
+    assert not any(l.strip() in wcs for l in out.splitlines())
 
 
-def test_emit_cw_arc_uses_G02() -> None:
-    font = t2g.Font(name="t")
-    font.glyphs["X"] = t2g.Glyph("X", [
-        t2g.Arc(0, 0, 1, 90, 0, ccw=False),
-    ])
-    out = t2g.emit_gcode("X", font, t2g.GCodeOpts(height_mm=9.0))
-    assert any(l.startswith("G02 ") for l in out.splitlines())
-    assert not any(l.startswith("G03 ") for l in out.splitlines())
+def test_emit_return_home_appended() -> None:
+    out = t2g.emit_gcode("I", "roman_simplex",
+                         t2g.GCodeOpts(height_mm=9.0, return_home=True))
+    lines = out.splitlines()
+    assert "G00 X0.0 Y0.0" in lines
+    assert lines.index("G00 X0.0 Y0.0") > lines.index("M03")
+    assert lines.index("G00 X0.0 Y0.0") < lines.index("M30")
 
 
-# ---------- integration ----------
+def test_emit_uses_per_glyph_advance_width() -> None:
+    """Consecutive letters should be offset by `advance_width * scale`, not by
+    a fixed global LetterSpacing. Verify by checking that the start of the
+    second glyph's first stroke is at the expected cursor position."""
+    from pyhershey import glyph_factory as gf
+    g_P = gf.from_ascii("P", "roman_simplex")
+    g_a = gf.from_ascii("a", "roman_simplex")
+    cap = t2g._cap_height("roman_simplex")
+    scale = 25.0 / cap
+    expected_a_start_x = g_P.advance_width * scale + g_a.segments[0][0][0] * scale
 
-def test_vendored_romans_font_loads_and_renders() -> None:
-    """Smoke test: parse the vendored romans.cxf and render 'AB'."""
-    font_path = REPO / "fonts" / "romans.cxf"
-    if not font_path.exists():
-        return  # vendored font is optional for CI
-    font = t2g.parse_cxf(font_path)
-    assert "A" in font.glyphs
-    assert "B" in font.glyphs
-    out = t2g.emit_gcode("AB", font, t2g.GCodeOpts(height_mm=10.0))
-    assert "M30" in out
-    # Roman Simplex is lines-only; should produce G01 moves but no arcs.
-    assert "G01 X" in out
+    out = t2g.emit_gcode("Pa", "roman_simplex", t2g.GCodeOpts(height_mm=25.0))
+    g00_lines = [l for l in out.splitlines() if l.startswith("G00 X")]
+    # Take the first G00 X after the second-glyph boundary (heuristic: 'a's
+    # first stroke starts further right than any P stroke).
+    xs = []
+    for line in g00_lines:
+        for tok in line.split():
+            if tok.startswith("X"):
+                xs.append(float(tok[1:]))
+    # All X positions in the 'a' glyph are >= P's advance — find the min that is.
+    a_xs = [x for x in xs if x >= g_P.advance_width * scale - 0.01]
+    assert a_xs, "expected at least one G00 in the 'a' glyph region"
+    assert abs(min(a_xs) - expected_a_start_x) < 0.05
+
+
+def test_letter_spacing_adds_gap() -> None:
+    """`letter_spacing_mm` should add a fixed mm gap after each glyph."""
+    out_tight = t2g.emit_gcode("II", "roman_simplex",
+                               t2g.GCodeOpts(height_mm=10.0, letter_spacing_mm=0.0))
+    out_loose = t2g.emit_gcode("II", "roman_simplex",
+                               t2g.GCodeOpts(height_mm=10.0, letter_spacing_mm=5.0))
+
+    def max_x(s: str) -> float:
+        xs = []
+        for line in s.splitlines():
+            for tok in line.split():
+                if tok.startswith("X") and len(tok) > 1:
+                    try:
+                        xs.append(float(tok[1:]))
+                    except ValueError:
+                        pass
+        return max(xs)
+
+    assert max_x(out_loose) > max_x(out_tight) + 4.0
+
+
+def test_list_fonts_cli(capsys) -> None:
+    rc = t2g.main(["--list-fonts"])
+    assert rc == 0
+    captured = capsys.readouterr().out.strip().splitlines()
+    assert "roman_simplex" in captured

@@ -8,8 +8,8 @@ pytest's `caplog` fixture to assert what was logged.
 import logging
 import struct
 
-from mdx40a.machine import MDX40A, MDX_ERROR_MESSAGES
-from mdx40a.usb import MdxMockUSB
+from rollingmill.machine import MDX40A, MDX_ERROR_MESSAGES
+from rollingmill.usb import MdxMockUSB
 
 
 class _ErrorMockUSB(MdxMockUSB):

@@ -27,7 +27,7 @@ Cut panel (visible when --file is given):
   x          step — send one block; or, while running, stop after the
              current block (parks back in step mode)
 
-Run: python3 -m mdx40a.ui.tui [-v|-vv] [--file <file.nc>]
+Run: rollingmill [-v|-vv] [--file <file.nc>]   (or: python -m rollingmill.tui)
 """
 
 import argparse
@@ -37,14 +37,14 @@ import logging
 import time
 from typing import Optional, Tuple
 
-from .. import machine as _machine
-from .. import trace as _trace
-from ..machine import (FLAG_VIEW_LED, FLAG_DOOR, FLAG_SPINDLE, FLAG_CMD_MOVE,
-                       FLAG_TOOLBTN, FLAG_NC_READY, FLAG_MOVING, FLAG_BUSY,
-                       FLAG_ERROR, FLAG_STATE, FLAG_STATE_SHIFT, JOG_SPEED_MAX,
-                       STATE_MAP, WCS_SLOT_NAMES)
-from ..trace import Tracer
-from ..cutjob import CutJob
+from . import machine as _machine
+from . import trace as _trace
+from .machine import (FLAG_VIEW_LED, FLAG_DOOR, FLAG_SPINDLE, FLAG_CMD_MOVE,
+                      FLAG_TOOLBTN, FLAG_NC_READY, FLAG_MOVING, FLAG_BUSY,
+                      FLAG_ERROR, FLAG_STATE, FLAG_STATE_SHIFT, JOG_SPEED_MAX,
+                      STATE_MAP, WCS_SLOT_NAMES)
+from .trace import Tracer
+from .cutjob import CutJob
 
 # ── Jog parameters ────────────────────────────────────────────────────────────
 
@@ -1162,12 +1162,12 @@ def main(argv=None) -> None:
     logging.getLogger('usb').setLevel(logging.WARNING)
     # Our own modules emit INFO during discover/handshake/jog — make sure those
     # land in `log_buf` even at -v=0 (which sets root to WARNING). Setting the
-    # `mdx40a` logger to an explicit floor bypasses root's level filter for any
-    # `mdx40a.*` sublogger (since effective-level walks stop at the first
-    # non-NOTSET ancestor). -vv still enables DEBUG for our code.
-    logging.getLogger('mdx40a').setLevel(min(level, logging.INFO))
+    # `rollingmill` logger to an explicit floor bypasses root's level filter for
+    # any `rollingmill.*` sublogger (since effective-level walks stop at the
+    # first non-NOTSET ancestor). -vv still enables DEBUG for our code.
+    logging.getLogger('rollingmill').setLevel(min(level, logging.INFO))
 
-    from ..usb import MdxUSB, MdxMockUSB
+    from .usb import MdxUSB, MdxMockUSB
 
     raw_link = MdxMockUSB() if args.mock else MdxUSB.discover()
     with _trace.open_trace() as t, t.wrap_link(raw_link) as link:

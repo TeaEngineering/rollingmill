@@ -6,9 +6,9 @@ next poll matches the expected value and the job acks immediately, mirroring
 the firmware's per-block ack on real hardware.
 """
 
-from mdx40a.cutjob import CutJob
-from mdx40a.machine import MDX40A
-from mdx40a.usb import MdxMockUSB
+from rollingmill.cutjob import CutJob
+from rollingmill.machine import MDX40A
+from rollingmill.usb import MdxMockUSB
 
 
 class _AckingMockUSB(MdxMockUSB):

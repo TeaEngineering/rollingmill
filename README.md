@@ -33,8 +33,8 @@ Getting started
 This library is available from PyPi as `rollingmill`.
 
     $ pip install rollingmill
-    $ python -m rollingmill.mdx40a
-    $ python -m rollingmill.mdx40a --file sample-nc/example-doc-part.gcode
+    $ rollingmill                                            # launch TUI on real hardware
+    $ rollingmill --file sample-nc/example-doc-part.gcode    # stream an NC file
 
 
 
@@ -57,7 +57,7 @@ MDX GCode Intepreter Notes
 * Dont forget to turn the spindle on (Sxxxx M03) otherwise the machine will fault on the first `G01` operation
 * Ensure all `XYZ` values have a decimal point, and no more than 3 digits of precision
 * Feed rates need a decimal point too
-
+* Machine coordinate moves `G53` must be always given in `G90` absolute programming. Specifying G53 in G91 incremental results in an error.
 
 
 ZCL-40A 4th Axis
@@ -77,10 +77,10 @@ These limits are enforced in firmware, including from the physical jog controls 
 Engraving text
 -----
 
-`utils/text_to_gcode.py` renders a text string to a single-line g-code file using a QCAD-format `.cxf` stroke font. The output is plain RS-274 with `G2`/`G3` arcs and is intended to be streamed via the TUI's `--file` flow.
+`rollingmill.text_to_gcode` renders a text string to a single-line g-code file using a Hershey stroke font from the `pyhershey` library. Glyphs carry per-character advance-width metrics, so spacing is naturally kerned. The output is plain RS-274 (lines only — no arcs) intended to be streamed via the TUI's `--file` flow.
 
 ```
-python utils/text_to_gcode.py \
+python -m rollingmill.text_to_gcode \
     --text "PART-001" \
     --out /tmp/label.gcode \
     --height 8 \
@@ -93,4 +93,4 @@ python utils/text_to_gcode.py \
 
 Then load on the machine: `rollingmill --file /tmp/label.gcode`.
 
-The default font is `fonts/romans.cxf` (Hershey Roman Simplex, public domain). Override with `--font /path/to/font.cxf`. See `fonts/LICENSE.txt` for font attribution.
+The default font is `roman_simplex`. List all available fonts with `--list-fonts`; pass any name (e.g. `--font gothic_german_triplex`) to switch. Use `--letter-spacing 1.5` to add (or, with a negative value, remove) extra mm of gap after each glyph's natural advance.

@@ -7,8 +7,8 @@ import struct
 
 import pytest
 
-from mdx40a.machine import FLAG_NC_READY, MDX40A
-from mdx40a.usb import MdxMockUSB
+from rollingmill.machine import FLAG_NC_READY, MDX40A
+from rollingmill.usb import MdxMockUSB
 
 
 def _state_block(
