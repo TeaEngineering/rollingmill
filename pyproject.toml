@@ -33,6 +33,7 @@ classifiers = [
 dependencies = [
     "pyusb>=1.2",
     "pyhershey>=0.1",
+    "setuptools",          # pyhershey imports pkg_resources; drop when upstream moves to importlib.metadata
 ]
 
 [project.optional-dependencies]
