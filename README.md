@@ -124,7 +124,7 @@ Engraving text
 
 ```
 python -m rollingmill.text_to_gcode \
-    --text "RollingMill" \
+    --text "Parcels" \
     --out /tmp/label.gcode \
     --height 8 \
     --z-cut -0.1 --z-safe 2 \
@@ -138,6 +138,7 @@ Then load on the machine: `rollingmill --file /tmp/label.gcode`.
 
 The default font is `roman_simplex`. List all available fonts with `--list-fonts`; pass any name (e.g. `--font gothic_german_triplex`) to switch. Use `--letter-spacing 1.5` to add (or, with a negative value, remove) extra mm of gap after each glyph's natural advance.
 
+ ![Engraving text](docs/screenshots/engraving-text.png)
 
 Drawing spirals
 -----
