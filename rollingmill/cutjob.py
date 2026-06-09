@@ -46,6 +46,7 @@ import time
 from typing import Optional
 
 from . import machine as _machine
+from . import sleep_inhibit
 
 
 def parse_nc_blocks(data: bytes) -> list:
@@ -284,11 +285,13 @@ class CutJob:
     def _ensure_bracket(self) -> None:
         if not self._bracket_open:
             self._m.begin_nc_job()
+            sleep_inhibit.acquire()
             self._bracket_open = True
 
     def _close_bracket(self) -> None:
         if self._bracket_open:
             self._m.end_nc_job()
+            sleep_inhibit.release()
             self._bracket_open = False
 
     def _set_error(self, msg: str) -> None:
