@@ -19,7 +19,7 @@ Keybindings:
   - / +      spindle & feed override %  −10 / +10
   c          open coordinate systems dialog (activate / move-to / overwrite)
   m          open Move-To picker (presets + User Specify numeric entry)
-  p          extras — log axis snapshot (RE: unknown_config_reads 0x5f0+0x3804)
+  t          open tool diameter offsets dialog
   q          quit
 
 Cut panel (visible when --file is given):

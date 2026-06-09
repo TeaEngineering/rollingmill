@@ -16,9 +16,13 @@ The project currently provides:
 * Interactive terminal UI (TUI)
 * Cross-platform support (Linux, macOS, Windows)
 
+<br clear="all">
+
+https://github.com/user-attachments/assets/d28e8a8f-c5a4-4877-8cd2-d2d479c63437
+
 Reverse Engineering
 ------
-The MDX USB protocol was reverse engineered from the official Windows driver stack using Ghidra analysis and protocol inspection. See [the protocol documentation](docs/). It should be obvious that the Roland DG corporation neither authorised or approved of this work.
+The MDX USB protocol was reverse engineered from the official Windows driver stack using Ghidra analysis and protocol inspection. See [the protocol documentation](docs/). It should be stated that the Roland DG corporation neither authorised or approved of this work.
 
 The official Windows stack consists of:
 
@@ -36,12 +40,50 @@ This library is available from PyPi as `rollingmill`.
     $ rollingmill                                            # launch TUI on real hardware
     $ rollingmill --file sample-nc/example-doc-part.gcode    # stream an NC file
 
+The interactive TUI exposes the following keybindings:
+
+**Jogging**
+
+| Key | Action |
+|-----|--------|
+| <kbd>←</kbd> / <kbd>→</kbd> | X axis −/+ |
+| <kbd>↑</kbd> / <kbd>↓</kbd> | Y axis −/+ |
+| <kbd>a</kbd> / <kbd>z</kbd> | Z axis +/− (`a` raises, `z` lowers) |
+| <kbd>[</kbd> / <kbd>]</kbd> | A axis −/+ |
+| <kbd>Esc</kbd> | cancel an in-flight jog |
+| <kbd>f</kbd> | cycle jog speed: vslow / slow / medium / fast |
+| <kbd>1</kbd>…<kbd>5</kbd> | step size: XYZ 0.01 / 0.1 / 1.0 / 10.0 / 50.0 mm — A 0.01 / 0.1 / 1.0 / 10.0 / 90.0° |
+
+**Spindle**
+
+| Key | Action |
+|-----|--------|
+| <kbd>s</kbd> | spindle on / off |
+| <kbd>d</kbd> | A-axis rotary drilling on / off |
+| <kbd>&lt;</kbd> / <kbd>&gt;</kbd> | spindle target RPM −500 / +500 |
+| <kbd>-</kbd> / <kbd>+</kbd> | spindle & feed override % −10 / +10 |
+
+**Dialogs**
+
+| Key | Action |
+|-----|--------|
+| <kbd>c</kbd> | coordinate systems (activate / move-to / overwrite) |
+| <kbd>m</kbd> | Move-To picker (presets + User Specify numeric entry) |
+| <kbd>t</kbd> | tool diameter offsets |
+| <kbd>q</kbd> | quit |
+
+**Cut panel** (only when `--file` is given)
+
+| Key | Action |
+|-----|--------|
+| <kbd>r</kbd> | run — stream the file continuously to the end |
+| <kbd>x</kbd> | step — send one block; or, while running, stop after the current block |
 
 
 Gotchas/Notes using the mill
 -----
 
-* If your NC-code 'crashes' the Z position above zero (i.e. at the top of the machine), then the machine's interpreter starts running rapidly flattened against Z=0 (all feeds become rapid moves, descending is inhibited) until the end of the program. This is quite terrifying should it happen, but is a machine feature.
+* If your NC-code 'crashes' the Z position above absolute machine zero (i.e. at the top of the machine), then the machine's interpreter starts running all future G codes as rapid moves flattened against Z=0 (all feeds become rapid moves, descending is inhibited) until the end of the program. This is quite terrifying should it happen, but is a machine feature.
 * If you send NC-code (i.e. G-code) in RML-1 mode, it will hang. Recovery for now is a power-cycle.
 * Single-stepping nc-code _partially works_, but the MDX complains about being starved of NC code and lights the View-LED when you reach a cutting operation.
 * The progress display during a cutting job is that of filling the machine buffer, rather than the actual block being executed, which usually runs a few blocks behind. It's a shame there are not two counters so that this could be made 100% accurate.
@@ -96,10 +138,10 @@ Then load on the machine: `rollingmill --file /tmp/label.gcode`.
 The default font is `roman_simplex`. List all available fonts with `--list-fonts`; pass any name (e.g. `--font gothic_german_triplex`) to switch. Use `--letter-spacing 1.5` to add (or, with a negative value, remove) extra mm of gap after each glyph's natural advance.
 
 
-Drawing neat spirals
+Drawing spirals
 -----
 
-`rollingmill.spiral` renders a "neat spiral" — mathematically a [hypotrochoid](https://en.wikipedia.org/wiki/Hypotrochoid), the curve traced when a small toothed wheel rolls inside a fixed toothed ring. You give it the two gear tooth counts and a pen-arm length, and it emits a single closed pen-down/pen-up loop scaled to fit your requested overall radius.
+`rollingmill.spiral` renders [hypotrochoids](https://en.wikipedia.org/wiki/Hypotrochoid), the curve traced when a small toothed wheel rolls inside a fixed toothed ring. You give it the two gear tooth counts and a pen-arm length, and it emits a single closed pen-down/pen-up loop scaled to fit your requested overall radius.
 
 ```
 python -m rollingmill.spiral \
