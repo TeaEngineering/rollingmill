@@ -1,7 +1,19 @@
 """Tests for rollingmill.text_to_gcode — pyhershey-backed g-code emit."""
 from __future__ import annotations
 
-from rollingmill import text_to_gcode as t2g
+import sys
+
+import pytest
+
+# pyhershey imports pkg_resources, which is unbundled from Python 3.12+.
+# Skip the whole module before its imports run; collection would otherwise fail.
+if sys.version_info >= (3, 12):
+    pytest.skip(
+        "pyhershey requires pkg_resources (setuptools), unbundled from Python 3.12+",
+        allow_module_level=True,
+    )
+
+from rollingmill import text_to_gcode as t2g  # noqa: E402
 
 
 # ---------- font discovery ----------
