@@ -158,3 +158,33 @@ python -m rollingmill.spiral \
 The output uses `G02` / `G03` arcs with incremental I/J offsets — each arc is fitted adaptively to the true hypotrochoid, with maximum deviation bounded by `--chord-tol` (default 0.05 mm).
 
 Then load on the machine: `rollingmill --file /tmp/spiral.gcode`.
+
+ ![Drawing spirals](docs/screenshots/spirals.png)
+
+Drawing mazes
+-----
+
+`rollingmill.maze` carves a random rectangular maze using the [`erbsland-maze`](https://pypi.org/project/erbsland-maze/) library, extracts the wall *centerlines* (one stroke per wall, not the outline of a thick wall), and emits a single-pass pen-down/pen-up G-code program. Start- and end-of-path rooms are flagged with small marker squares.
+
+```
+python -m rollingmill.maze \
+    --out /tmp/maze.gcode \
+    --width 100 --height 100 \
+    --cell 4 --wall 1.7 \
+    --seed 42 \
+    --x0 100 --y0 100 \
+    --feed 200 \
+    --workspace G54
+```
+
+`--width` and `--height` set the overall canvas in mm; `--cell` is the grid pitch and `--wall` is the wall thickness used when laying out the cells. `--seed` makes the maze reproducible (a random seed is chosen and echoed into the header if omitted). `--endpoints {none,outline,filled}` selects how the two path-end rooms are marked (default `outline`).
+
+Then load on the machine: `rollingmill --file /tmp/maze.gcode`.
+
+ ![Drawing mazes](docs/screenshots/mazes.png)
+
+See also
+----
+* [10maurycy10/gcode2rml](https://github.com/10maurycy10/gcode2rml) can translate g-code to RML
+* [fibasile/pi.mill](https://github.com/fibasile/pi.mill) can stream RML over serial ports to the MDX15/MDX20 previous generation
+
