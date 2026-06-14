@@ -120,7 +120,7 @@ These limits are enforced in firmware, including from the physical jog controls 
 Engraving text
 -----
 
-`rollingmill.text_to_gcode` renders a text string to a single-line G-code file using a Hershey stroke font from the `pyhershey` library. Glyphs carry per-character advance-width metrics, so spacing is naturally kerned. The output is plain RS-274 intended to be streamed via the TUI's `--file` flow.
+`rollingmill.text_to_gcode` renders a text string to a G-code file using a Hershey stroke font from the `pyhershey` library. Glyphs carry per-character advance-width metrics, so spacing is naturally kerned. The output is plain RS-274 intended to be streamed via the TUI's `--file` flow.
 
 ```
 python -m rollingmill.text_to_gcode \
