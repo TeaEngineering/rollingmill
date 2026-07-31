@@ -230,6 +230,26 @@ Then load on the machine: `rollingmill --file /tmp/spiral.gcode`.
 
  ![Drawing spirals](docs/screenshots/spirals.png)
 
+Cutting holes
+-----
+
+`rollingmill.cuthole` mills a round through-hole of a given outer diameter in thin sheet, centred on the workspace origin, leaving a few break-off tabs so the disc stays captive until you finish it with a scalpel/craft knife. The tool follows the *inside* of the hole (cutter-centre radius `OD/2 − tool_dia/2`), so the finished hole diameter equals `--od`.
+
+```
+python -m rollingmill.cuthole \
+    --od 47 \
+    --out /tmp/hole.gcode \
+    --tool-dia 5 \
+    --thickness 1.5 \
+    --tabs 4 --tab-frac 0.05 \
+    --z-step 0.1 \
+    --workspace G54
+```
+
+`--od` is the finished hole diameter in mm; `--tool-dia` is the end-mill diameter (default 5, or pulled from `--tool`). The cut ramps down in flat passes of `--z-step` mm (default 0.1) until it breaks through `--thickness` (default 1.5) plus a small `--overcut` (default 0.1) into the backing. `--tabs` sets the number of evenly spaced tabs (default 4, at N/S/E/W) and `--tab-frac` their width as a fraction of the OD (default 0.05 = 5%); tabs are left at full thickness, the tool lifting clear over each one on every pass. Pass `--x0`/`--y0` if the hole centre isn't the work-offset origin.
+
+With `--helix` the tool descends continuously along the arcs (one `--z-step` of pitch per revolution) instead of stepping in flat passes, finishing with one flat pass at full depth. 
+
 Drawing mazes
 -----
 
