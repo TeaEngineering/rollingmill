@@ -1,4 +1,4 @@
-"""Tests for rollingmill.text_to_gcode — pyhershey-backed g-code emit."""
+"""Tests for rollingmill.text — pyhershey-backed g-code emit."""
 from __future__ import annotations
 
 import sys
@@ -13,7 +13,7 @@ if sys.version_info >= (3, 12):
         allow_module_level=True,
     )
 
-from rollingmill import text_to_gcode as t2g  # noqa: E402
+from rollingmill import text as t2g  # noqa: E402
 
 
 # ---------- font discovery ----------

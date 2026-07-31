@@ -29,6 +29,9 @@ from math import gcd
 from pathlib import Path
 from typing import Iterator
 
+from rollingmill import tools as _tools
+from rollingmill.tools import resolve as _resolve
+
 
 @dataclass
 class SpiralOpts:
@@ -334,10 +337,10 @@ def main(argv: list[str] | None = None) -> int:
                    help="Centre Y in mm (default 0.0)")
     p.add_argument("--chord-tol", type=float, default=0.05,
                    help="Chord tolerance for sampling, mm (default 0.05)")
-    p.add_argument("--feed", type=float, default=200.0,
-                   help="Cutting feed mm/min (default 200)")
-    p.add_argument("--plunge-feed", type=float, default=50.0,
-                   help="Z plunge feed mm/min (default 50)")
+    p.add_argument("--feed", type=float, default=None,
+                   help="Cutting feed mm/min (default 200, or from --tool)")
+    p.add_argument("--plunge-feed", type=float, default=None,
+                   help="Z plunge feed mm/min (default 50, or from --tool)")
     p.add_argument("--z-safe", type=float, default=2.0,
                    help="Pen-up Z height mm (default 2.0)")
     p.add_argument("--z-cut", type=float, default=-0.1,
@@ -347,8 +350,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--workspace", default=None,
                    choices=["G54", "G55", "G56", "G57", "G58", "G59"],
                    help="Workspace offset to select in header (e.g. G54)")
-    p.add_argument("--spindle-rpm", type=int, default=10000,
-                   help="Spindle speed in RPM, emitted with M03 (default 10000)")
+    p.add_argument("--spindle-rpm", type=int, default=None,
+                   help="Spindle speed in RPM, emitted with M03 "
+                        "(default 10000, or from --tool)")
+    p.add_argument("--tool", default=None,
+                   help="Tool id or name from ~/.rollingmill/tools.json; "
+                        "supplies defaults for --feed, --plunge-feed and "
+                        "--spindle-rpm if those are not set")
     args = p.parse_args(argv)
 
     if args.ring <= args.rotor:
@@ -360,15 +368,23 @@ def main(argv: list[str] | None = None) -> int:
     if args.radius <= 0:
         p.error(f"--radius ({args.radius}) must be positive")
 
+    tool = None
+    if args.tool is not None:
+        try:
+            tool = _tools.find(_tools.load(), args.tool)
+        except (KeyError, ValueError) as e:
+            p.error(str(e))
+
     opts = SpiralOpts(
         radius_mm=args.radius,
         x0=args.x0, y0=args.y0,
         chord_tol_mm=args.chord_tol,
-        feed=args.feed, plunge_feed=args.plunge_feed,
+        feed=_resolve(args.feed, tool, "feed_mm_min", 200.0),
+        plunge_feed=_resolve(args.plunge_feed, tool, "plunge_feed_mm_min", 50.0),
         z_safe=args.z_safe, z_cut=args.z_cut,
         return_home=args.return_home,
         workspace=args.workspace,
-        spindle_rpm=args.spindle_rpm,
+        spindle_rpm=_resolve(args.spindle_rpm, tool, "spindle_rpm", 10000),
     )
     gcode = emit_gcode(args.ring, args.rotor, args.pen, opts)
     args.out.write_text(gcode)

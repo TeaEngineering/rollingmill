@@ -172,13 +172,27 @@ When this unit is installed, the X-, Y-, and Z-axis travel of the MDX-40A is red
 These limits are enforced in firmware, including from the physical jog controls on the machine itself. The X-restriction clears the rotary axis body, but not the rotary vice or tailstock, so care is needed.
 
 
+Tool library
+-----
+
+The path emitters (`relief3D`, `totem`, `maze`, `spiral`, `text`) share a host-side cutting-tool library at `~/.rollingmill/tools.json`. Each entry carries geometry (type, diameter, length, V-bit half-angle, etc.) plus suggested feeds and spindle speed, and may reference one of the 8 firmware diameter-offset slots.
+
+```
+$ python -m rollingmill.tools init     # seed with a 6mm end mill, 3mm ball nose, 60° V-bit
+$ python -m rollingmill.tools list
+$ python -m rollingmill.tools show ball_3mm
+```
+
+Emitters accept `--tool <id>` to pull defaults for `--feed`, `--plunge-feed` and `--spindle-rpm` (and for `totem`, `--tool-diameter`). Explicit flags always override the tool's defaults. The file is plain JSON and can be hand-edited; the `relief3D` carver requires `--tool` since it needs the cutter's tip shape for collision-free path planning.
+
+
 Engraving text
 -----
 
-`rollingmill.text_to_gcode` renders a text string to a G-code file using a Hershey stroke font from the `pyhershey` library. Glyphs carry per-character advance-width metrics, so spacing is naturally kerned. The output is plain RS-274 intended to be streamed via the TUI's `--file` flow.
+`rollingmill.text` renders a text string to a G-code file using a Hershey stroke font from the `pyhershey` library. Glyphs carry per-character advance-width metrics, so spacing is naturally kerned. The output is plain RS-274 intended to be streamed via the TUI's `--file` flow.
 
 ```
-python -m rollingmill.text_to_gcode \
+python -m rollingmill.text \
     --text "Parcels" \
     --out /tmp/label.gcode \
     --height 8 \
