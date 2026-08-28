@@ -143,12 +143,12 @@ def test_crossing_strokes_do_not_deepen_at_the_intersection(tmp_path):
 
 def test_fill_and_stroke_are_classified_separately(tmp_path):
     pytest.importorskip("svgelements")
-    body = ('<rect x="10" y="10" width="30" height="20" fill="#000"/>'
+    body = ('<rect id="bg" x="10" y="10" width="30" height="20" fill="#000"/>'
             '<path id="ln" d="M 50,25 L 90,25" style="fill:none;stroke:#000;stroke-width:1"/>')
     svg = _write_svg(tmp_path, body)
     opts = VCarveOpts(page_w_mm=100, page_h_mm=50)
-    ids, strokes, has_fill = vcarve.parse_svg_features(svg, opts)
-    assert has_fill  # the rect
+    ids, strokes, fill_elems = vcarve.parse_svg_features(svg, opts)
+    assert [e[0] for e in fill_elems] == ["bg"]  # the rect, by id
     assert "ln" in ids and len(strokes) == 1  # the line is a stroke, not a fill
 
 
@@ -299,6 +299,66 @@ def test_straight_stroke_fits_no_arc():
     spec = StrokeSpec(subpaths=[line], width_mm=2.0, linecap="round")
     tps = vcarve._stroke_toolpaths(spec, opts)
     assert all(not t.arcs for t in tps)
+
+
+def test_fill_annulus_recovers_arcs():
+    # A filled ring: its medial axis is a circle, so the fill carve should emit
+    # arcs rather than a chain of chords.
+    n = 200
+    yy, xx = np.mgrid[0:n, 0:n]
+    rr = np.hypot(xx - n / 2, yy - n / 2) * 0.5  # pitch 0.5 mm -> radius ~30 mm
+    mask = (rr >= 28.0) & (rr <= 32.0)  # 4 mm wide ring
+    opts = VCarveOpts(page_w_mm=100, page_h_mm=100, pitch_mm=0.5, half_angle_deg=45,
+                      max_depth_mm=10, fill_arcs=True, fill_arc_tol_mm=0.3, prune_mm=1.0)
+    tps = vcarve.build_toolpaths(mask, opts)
+    assert sum(len(t.arcs) for t in tps) >= 1  # ring recovered as arc(s)
+
+
+def test_fills_emit_no_arcs_by_default():
+    n = 200
+    yy, xx = np.mgrid[0:n, 0:n]
+    rr = np.hypot(xx - n / 2, yy - n / 2) * 0.5
+    mask = (rr >= 28.0) & (rr <= 32.0)
+    opts = VCarveOpts(page_w_mm=100, page_h_mm=100, pitch_mm=0.5, half_angle_deg=45,
+                      max_depth_mm=10, fill_arcs=False, prune_mm=1.0)
+    tps = vcarve.build_toolpaths(mask, opts)
+    assert all(not t.arcs for t in tps)
+
+
+def test_helical_arc_emits_z_only_when_depth_ramps():
+    from rollingmill.vcarve import ToolPath
+    opts = VCarveOpts(stepdown_mm=100.0)  # single pass
+    ramp = ToolPath([(0.0, 0.0, 2.0), (10.0, 0.0, 0.5)], {0: (5.0, 3.0, True)})
+    arc_line = [ln for ln in vcarve.emit_gcode([ramp], opts).splitlines()
+                if ln.startswith(("G02", "G03"))][0]
+    assert "Z" in arc_line and "I" in arc_line  # helical: has a Z word
+    flat = ToolPath([(0.0, 0.0, 1.0), (10.0, 0.0, 1.0)], {0: (5.0, 3.0, True)})
+    flat_line = [ln for ln in vcarve.emit_gcode([flat], opts).splitlines()
+                 if ln.startswith(("G02", "G03"))][0]
+    assert "Z" not in flat_line  # constant depth -> planar arc, no Z
+
+
+def test_ensure_ids_assigns_ids_to_idless_shapes(tmp_path):
+    svg = _write_svg(tmp_path, '<rect x="1" y="1" width="5" height="5" fill="#000"/>'
+                     '<path id="keep" d="M0,0 L1,1" style="stroke:#000"/>')
+    dst = tmp_path / "work.svg"
+    vcarve._ensure_ids(svg, dst)
+    import xml.etree.ElementTree as ET
+    ids = [n.get("id") for n in ET.parse(dst).getroot().iter()
+           if n.tag.split("}")[-1] in ("rect", "path")]
+    assert "keep" in ids and all(i for i in ids)  # every shape now has an id
+
+
+def test_run_writes_both_preview_png_and_svg(tmp_path):
+    pytest.importorskip("svgelements")
+    svg = _write_svg(tmp_path, '<path d="M 10,25 L 90,25" '
+                     'style="fill:none;stroke:#000;stroke-width:2"/>')
+    base = tmp_path / "prev.png"
+    opts = VCarveOpts(page_w_mm=100, page_h_mm=50, preview_path=base)
+    vcarve.run(svg, opts, is_png=False)
+    assert base.exists() and base.with_suffix(".svg").exists()
+    svg_txt = base.with_suffix(".svg").read_text()
+    assert "<polyline" in svg_txt and "stroke=" in svg_txt
 
 
 def test_preview_png_is_written_with_ink(tmp_path):
