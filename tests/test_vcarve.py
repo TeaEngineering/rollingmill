@@ -361,6 +361,51 @@ def test_run_writes_both_preview_png_and_svg(tmp_path):
     assert "<polyline" in svg_txt and "stroke=" in svg_txt
 
 
+def test_marker_end_suppresses_shaft_cap_but_marker_arms_are_capped():
+    from rollingmill.vcarve import StrokeSpec
+    line = [(10.0, 25.0), (90.0, 25.0)]
+    opts = VCarveOpts(page_w_mm=100, page_h_mm=50, max_depth_mm=10)
+
+    def cap_count(spec):
+        return sum(1 for t in vcarve._stroke_toolpaths(spec, opts)
+                   if len(t.pts) == 2 and min(p[2] for p in t.pts) <= 1e-9)
+
+    # shaft with a marker at one end -> only the bare end is capped (2 spurs)
+    assert cap_count(StrokeSpec(subpaths=[line], width_mm=2.0, linecap="butt",
+                                marker_end="url(#a)")) == 2
+    # marker geometry itself IS capped (square) so the arm tips finish square
+    assert cap_count(StrokeSpec(subpaths=[line], width_mm=2.0, linecap="square",
+                                is_marker=True)) == 4
+
+
+def test_arc_fit_only_spans_curve_eligible_points():
+    # a semicircle (curve-origin, eligible) then a straight L corner (line-origin).
+    circ = [(50 + 20 * math.cos(t), 50 - 20 * math.sin(t)) for t in
+            [i / 40 * math.pi for i in range(41)]]
+    tail = [(70.0, 50.0), (70.0, 70.0), (90.0, 70.0)]  # sharp corner in straight lines
+    poly = circ + tail
+    elig = [True] * len(circ) + [False] * len(tail)
+    # A loose tolerance would otherwise round the L corner into a tiny arc.
+    vidx, arcs = vcarve._fit_arcs(poly, 0.3, 0.05, eligible=elig)
+    assert arcs  # the semicircle is recovered
+    # every fitted arc lies wholly within the eligible (curve) region
+    for seg_pos in arcs:
+        assert elig[vidx[seg_pos]] and elig[vidx[seg_pos + 1]]
+
+
+def test_marker_geometry_is_never_arc_fitted():
+    from rollingmill.vcarve import StrokeSpec
+    # a curved subpath that WOULD fit an arc for a normal stroke...
+    arc = [(50 + 20 * math.cos(t), 50 - 20 * math.sin(t)) for t in
+           [i / 40 * math.pi for i in range(41)]]
+    opts = VCarveOpts(page_w_mm=100, page_h_mm=100, max_depth_mm=10, arcs=True)
+    normal = vcarve._stroke_toolpaths(StrokeSpec(subpaths=[arc], width_mm=2.0), opts)
+    assert sum(len(t.arcs) for t in normal) >= 1  # normal stroke fits an arc
+    marker = vcarve._stroke_toolpaths(
+        StrokeSpec(subpaths=[arc], width_mm=2.0, is_marker=True), opts)
+    assert all(not t.arcs for t in marker)  # marker geometry never does
+
+
 def test_preview_png_is_written_with_ink(tmp_path):
     from PIL import Image
 

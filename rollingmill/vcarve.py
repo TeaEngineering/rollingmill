@@ -38,6 +38,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -52,6 +53,12 @@ _VCARVE_EXTRA_HINT = (
     "or manually:\n"
     "    pip install numpy scipy scikit-image pillow svgelements"
 )
+
+
+def _progress(opts: VCarveOpts, msg: str) -> None:
+    """Print a progress line to stdout when running as a CLI (opts.progress)."""
+    if opts.progress:
+        print(f"[vcarve] {msg}", flush=True)
 
 
 def _require_deps():
@@ -125,6 +132,7 @@ class VCarveOpts:
     fill_pitch_mm: float = 0.05  # per-element raster pitch for fills (matches the old whole-page)
     preview_path: Path | None = None  # if set, also write a toolpath preview PNG
     bit_diameter_mm: float | None = None  # caps the preview's cone footprint radius
+    progress: bool = False  # print progress to stdout (set by the CLI; silent as a library)
 
 
 # --- rasterisation -----------------------------------------------------------
@@ -402,18 +410,23 @@ def build_fill_toolpaths(svg_path: Path, fill_elems, opts: VCarveOpts) -> list[T
     background margin gives every edge a true exterior, fixing the medial axis."""
     np, _, _ = _require_deps()
     out: list[ToolPath] = []
-    for elem_id, bbox in fill_elems:
+    n = len(fill_elems)
+    for k, (elem_id, bbox) in enumerate(fill_elems, 1):
         if not elem_id:
             continue
+        x0, y0, x1, y1 = bbox
+        t0 = time.time()
+        _progress(opts, f"fill {k}/{n} {elem_id!r} ({x1 - x0:.0f}x{y1 - y0:.0f}mm @{opts.fill_pitch_mm}mm): rendering + medial axis...")
         mask = _render_element_mask(svg_path, elem_id, opts)
         h, w = mask.shape
-        x0, y0, x1, y1 = bbox
         pitch = ((x1 - x0) / w + (y1 - y0) / h) / 2.0  # actual mm/px from render (pre-pad)
         pad = max(2, math.ceil(0.5 / pitch))  # ~0.5 mm background border
         mask = np.pad(mask, pad, mode="constant", constant_values=False)
         polylines, dist = _mask_medial_polylines(mask, opts, pitch)
         # padded pixel (0,0) sits `pad` px left/above the element's bbox origin
-        out += _polylines_to_toolpaths(polylines, dist, x0 - pad * pitch, y0 - pad * pitch, pitch, opts)
+        tps = _polylines_to_toolpaths(polylines, dist, x0 - pad * pitch, y0 - pad * pitch, pitch, opts)
+        out += tps
+        _progress(opts, f"fill {k}/{n} {elem_id!r}: {len(tps)} toolpaths ({time.time() - t0:.1f}s)")
     return out
 
 
@@ -563,6 +576,10 @@ class StrokeSpec:
     miterlimit: float = 4.0
     marker_start: str | None = None
     marker_end: str | None = None
+    is_marker: bool = False  # geometry expanded from a marker (no arc-fitting)
+    # Per-subpath, per-point flag: did this point come from a curved (bezier/arc)
+    # segment? Only True runs are arc-fit candidates. Empty = treat all as curve.
+    subpath_curves: list[list[bool]] = field(default_factory=list)
 
 
 def _svg_shapes(svg_path: Path):
@@ -594,24 +611,37 @@ def _classify(e) -> str | None:
     return None
 
 
-def _flatten(shape, step_mm: float) -> list[list[tuple[float, float]]]:
-    """Flatten a path/shape into subpath polylines, sampling curves by length."""
-    subpaths: list[list[tuple[float, float]]] = []
+_CURVE_SEGS = ("CubicBezier", "QuadraticBezier", "Arc")
+
+
+def _flatten(shape, step_mm: float) -> list[tuple[list[tuple[float, float]], list[bool]]]:
+    """Flatten a path/shape into subpaths, sampling curves by length.
+
+    Returns ``(points, curve_flags)`` per subpath; ``curve_flags[i]`` is True
+    when point ``i`` came from a curved segment (bezier/arc). Straight (line)
+    points are False, so only bezier/arc-origin runs are arc-fit candidates."""
+    subpaths: list[tuple[list[tuple[float, float]], list[bool]]] = []
     cur: list[tuple[float, float]] = []
+    curf: list[bool] = []
+
+    def close():
+        if len(cur) >= 2:
+            subpaths.append((cur[:], curf[:]))
+
     for seg in shape.segments():
         name = type(seg).__name__
         if name == "Move":
-            if len(cur) >= 2:
-                subpaths.append(cur)
+            close()
             p = seg.end
-            cur = [(float(p.x), float(p.y))]
+            cur, curf = [(float(p.x), float(p.y))], [False]
         elif name == "Close":
             if cur:
                 cur.append(cur[0])
-                if len(cur) >= 2:
-                    subpaths.append(cur)
-            cur = []
+                curf.append(False)
+                close()
+            cur, curf = [], []
         else:  # Line / CubicBezier / QuadraticBezier / Arc
+            is_curve = name in _CURVE_SEGS
             try:
                 length = float(seg.length(error=1e-4))
             except TypeError:
@@ -620,8 +650,8 @@ def _flatten(shape, step_mm: float) -> list[list[tuple[float, float]]]:
             for i in range(1, n + 1):
                 p = seg.point(i / n)
                 cur.append((float(p.x), float(p.y)))
-    if len(cur) >= 2:
-        subpaths.append(cur)
+                curf.append(is_curve)
+    close()
     return subpaths
 
 
@@ -733,12 +763,14 @@ def _cap_spurs(sp, r, depth, linecap, at_start: bool):
     ]
 
 
-def _trim_polyline(sp, t_start: float, t_end: float):
-    """Shorten a polyline by arc length ``t_start``/``t_end`` from each end."""
+def _trim_polyline(sp, t_start: float, t_end: float, flags=None):
+    """Shorten a polyline by arc length ``t_start``/``t_end`` from each end.
 
-    def trim_front(pts, t):
+    If ``flags`` (per-point bool) is given, trims it in parallel and returns
+    ``(pts, flags)``; interpolated end points are marked non-curve (False)."""
+    def trim_front(pts, fl, t):
         if t <= 0.0:
-            return pts
+            return pts, fl
         acc = 0.0
         for i in range(len(pts) - 1):
             seg = math.dist(pts[i], pts[i + 1])
@@ -746,12 +778,14 @@ def _trim_polyline(sp, t_start: float, t_end: float):
                 f = (t - acc) / seg if seg > 0 else 0.0
                 nx = pts[i][0] + (pts[i + 1][0] - pts[i][0]) * f
                 ny = pts[i][1] + (pts[i + 1][1] - pts[i][1]) * f
-                return [(nx, ny)] + pts[i + 1 :]
+                return [(nx, ny)] + pts[i + 1 :], ([False] + fl[i + 1 :] if fl is not None else None)
             acc += seg
-        return pts[-1:]
+        return pts[-1:], (fl[-1:] if fl is not None else None)
 
-    out = trim_front(list(sp), t_start)
-    return list(reversed(trim_front(list(reversed(out)), t_end)))
+    pts, fl = trim_front(list(sp), list(flags) if flags is not None else None, t_start)
+    rpts, rfl = trim_front(list(reversed(pts)), list(reversed(fl)) if fl is not None else None, t_end)
+    pts, fl = list(reversed(rpts)), (list(reversed(rfl)) if rfl is not None else None)
+    return (pts, fl) if flags is not None else pts
 
 
 # --- circular-arc fitting for stroke centrelines ----------------------------
@@ -847,12 +881,20 @@ def _rdp2(pts, tol):
     return _rdp2(pts[: idx + 1], tol)[:-1] + _rdp2(pts[idx:], tol)
 
 
-def _grow_arc(poly, i, tol, min_pts=6, min_sweep_deg=12.0, max_sweep_deg=180.0, max_radius=5000.0):
-    """Longest circular run starting at ``poly[i]``: (end_index, cx, cy, cw) or None."""
+def _grow_arc(poly, i, tol, min_pts=6, min_sweep_deg=12.0, max_sweep_deg=180.0, max_radius=5000.0, eligible=None):
+    """Longest circular run starting at ``poly[i]``: (end_index, cx, cy, cw) or None.
+
+    ``eligible`` (per-point bool) restricts the run to a contiguous eligible span,
+    so arcs are never fitted across straight (line-origin) points."""
     n = len(poly)
+    end = n - 1
+    if eligible is not None:  # cap the run at the contiguous eligible span from i
+        end = i
+        while end + 1 < n and eligible[end + 1]:
+            end += 1
     best = None
     j = i + min_pts - 1
-    while j < n:
+    while j <= end:
         fit = _circle_fit(poly[i : j + 1])
         if fit is None:
             break
@@ -896,11 +938,15 @@ def _rdp2_idx(poly, lo, hi, tol):
     return _rdp2_idx(poly, lo, idx, tol)[:-1] + _rdp2_idx(poly, idx, hi, tol)
 
 
-def _fit_arcs(poly, arc_tol, line_tol):
+def _fit_arcs(poly, arc_tol, line_tol, eligible=None):
     """Compress a polyline into (vertex indices, arcs). Arc runs collapse to one
     segment each; straight runs are RDP'd to lines. ``arcs`` maps segment index
     (position in the returned vertex list) -> (cx, cy, cw). Returning indices
-    lets callers carry a per-vertex payload (e.g. depth) through the fit."""
+    lets callers carry a per-vertex payload (e.g. depth) through the fit.
+
+    ``eligible`` (per-point bool) marks which points may belong to an arc; a
+    point that is not eligible (e.g. from a straight line segment) is never the
+    start of, or spanned by, an arc -- so sharp line corners stay corners."""
     n = len(poly)
     if n < 2:
         return list(range(n)), {}
@@ -915,7 +961,9 @@ def _fit_arcs(poly, arc_tol, line_tol):
 
     i = 0
     while i < n - 1:
-        grown = _grow_arc(poly, i, arc_tol)
+        grown = None
+        if eligible is None or eligible[i]:
+            grown = _grow_arc(poly, i, arc_tol, eligible=eligible)
         if grown is not None:
             j, cx, cy, cw = grown
             flush(i)  # commit the straight run up to poly[i]
@@ -976,10 +1024,12 @@ def _stroke_toolpaths(spec: StrokeSpec, opts: VCarveOpts) -> list[ToolPath]:
         flipped = _rdp(flipped, opts.chord_tol_mm)
         return ToolPath(flipped) if len(flipped) >= 2 else None
 
-    def main_tp(main_xy):  # arc-fitted centreline groove
+    def main_tp(main_xy, curve_flags):  # arc-fitted centreline groove
         poly = [flip(x, y) for (x, y) in main_xy]
-        if opts.arcs and len(poly) >= 3:
-            vidx, arcs = _fit_arcs(poly, opts.arc_tol_mm, opts.chord_tol_mm)
+        # Only bezier/arc-origin geometry is an arc candidate; straight line
+        # segments (triangle corners) and marker geometry are never fitted.
+        if opts.arcs and not spec.is_marker and len(poly) >= 3:
+            vidx, arcs = _fit_arcs(poly, opts.arc_tol_mm, opts.chord_tol_mm, eligible=curve_flags)
             verts = [poly[i] for i in vidx]
         else:
             verts, arcs = _rdp2(poly, opts.chord_tol_mm), {}
@@ -988,9 +1038,10 @@ def _stroke_toolpaths(spec: StrokeSpec, opts: VCarveOpts) -> list[ToolPath]:
         return ToolPath([(x, y, depth) for (x, y) in verts], arcs)
 
     out: list[ToolPath] = []
-    for sp in spec.subpaths:
+    for si, sp in enumerate(spec.subpaths):
         if len(sp) < 2:
             continue
+        flags = spec.subpath_curves[si] if si < len(spec.subpath_curves) else [True] * len(sp)
         closed = _is_closed(sp)
         spurs: list[list[tuple[float, float, float]]] = []
 
@@ -998,15 +1049,27 @@ def _stroke_toolpaths(spec: StrokeSpec, opts: VCarveOpts) -> list[ToolPath]:
         for i in _corner_indices(sp, closed):
             spurs += _join_spurs(sp, i, closed, r, depth, spec)
 
-        # Cap sharpening + groove trimming at open ends.
-        main = sp
+        # Cap sharpening + groove trimming at open ends. An end covered by a
+        # marker (an arrowhead) gets no cap *spurs* -- the arrowhead sits on it --
+        # but the groove is still trimmed back so its rounded end tucks under the
+        # marker instead of poking out at the vertex. The marker's own arm tips
+        # do get capped (so they finish square).
+        main, main_flags = sp, flags
         if not closed:
-            spurs += _cap_spurs(sp, r, depth, spec.linecap, at_start=True)
-            spurs += _cap_spurs(sp, r, depth, spec.linecap, at_start=False)
-            if spec.linecap == "butt":  # pull the groove back so it doesn't round past the end
-                main = _trim_polyline(sp, r, r)
+            cap_start = not spec.marker_start
+            cap_end = not spec.marker_end
+            if cap_start:
+                spurs += _cap_spurs(sp, r, depth, spec.linecap, at_start=True)
+            if cap_end:
+                spurs += _cap_spurs(sp, r, depth, spec.linecap, at_start=False)
+            trim_start = (cap_start and spec.linecap == "butt") or bool(spec.marker_start)
+            trim_end = (cap_end and spec.linecap == "butt") or bool(spec.marker_end)
+            if trim_start or trim_end:
+                main, main_flags = _trim_polyline(
+                    sp, r if trim_start else 0.0, r if trim_end else 0.0, flags=flags
+                )
 
-        tp = main_tp(main)
+        tp = main_tp(main, main_flags)
         if tp is not None:
             out.append(tp)
         for spur in spurs:
@@ -1037,15 +1100,16 @@ def parse_svg_features(
             eid = e.values.get("id")
             if eid:
                 stroke_ids.add(eid)
-            subpaths = _flatten(e, opts.stroke_flatten_mm)
-            if subpaths:
+            flat = _flatten(e, opts.stroke_flatten_mm)
+            if flat:
                 try:
                     mlim = float(e.values.get("stroke-miterlimit") or 4.0)
                 except (TypeError, ValueError):
                     mlim = 4.0
                 strokes.append(
                     StrokeSpec(
-                        subpaths=subpaths,
+                        subpaths=[pts for pts, _cf in flat],
+                        subpath_curves=[cf for _pts, cf in flat],
                         width_mm=float(e.implicit_stroke_width),
                         linejoin=e.values.get("stroke-linejoin") or "miter",
                         linecap=e.values.get("stroke-linecap") or "butt",
@@ -1172,7 +1236,7 @@ def _marker_specs(svg_path: Path, strokes: list[StrokeSpec], opts: VCarveOpts) -
                     cpath *= svgelements.Matrix(ctransform)
                 content = _flatten(cpath, max(opts.stroke_flatten_mm / max(s, 1e-6), 1e-3))
                 world = []
-                for subp in content:
+                for subp, _cf in content:
                     pts = []
                     for (px, py) in subp:
                         lx, ly = (px - refx) * s, (py - refy) * s
@@ -1181,7 +1245,7 @@ def _marker_specs(svg_path: Path, strokes: list[StrokeSpec], opts: VCarveOpts) -
                         pts.append((wx, wy))
                     world.append(pts)
                 cw = _style_num(cstyle, "stroke-width", 1.0) * s
-                out.append(StrokeSpec(subpaths=world, width_mm=cw))
+                out.append(StrokeSpec(subpaths=world, width_mm=cw, linecap="square", is_marker=True))
     return out
 
 
@@ -1330,28 +1394,44 @@ def render_preview_svg(paths: list[ToolPath], opts: VCarveOpts, out_svg: Path) -
 
 
 def run(svg_or_png: Path, opts: VCarveOpts, is_png: bool) -> str:
+    t_start = time.time()
     paths: list[ToolPath] = []
     if is_png:
+        _progress(opts, f"loading mask {svg_or_png.name}...")
         paths = build_toolpaths(load_png_to_mask(svg_or_png, opts.threshold), opts)
+        _progress(opts, f"{len(paths)} toolpaths from mask")
     else:
         with tempfile.TemporaryDirectory() as td:
             work = Path(td) / "work.svg"
+            _progress(opts, f"parsing {svg_or_png.name}...")
             _ensure_ids(svg_or_png, work)  # give every shape an id for per-element render
             _stroke_ids, strokes, fill_elems = parse_svg_features(work, opts)
+            _progress(opts, f"{len(fill_elems)} filled element(s), {len(strokes)} stroke(s)")
             if fill_elems:
                 paths += build_fill_toolpaths(work, fill_elems, opts)
+            n0 = len(paths)
             for spec in strokes:
                 paths += _stroke_toolpaths(spec, opts)
+            _progress(opts, f"strokes: {len(paths) - n0} toolpaths")
             if opts.markers:
+                n1 = len(paths)
                 try:
                     for mspec in _marker_specs(work, strokes, opts):
                         paths += _stroke_toolpaths(mspec, opts)
+                    if len(paths) > n1:
+                        _progress(opts, f"markers: {len(paths) - n1} toolpaths")
                 except Exception as e:  # markers are best-effort; never fail the carve
                     print(f"warning: could not expand markers ({e}); arrowheads skipped")
     if opts.preview_path is not None:
+        _progress(opts, f"rendering preview {opts.preview_path.name} + .svg ({len(paths)} paths)...")
+        t0 = time.time()
         render_preview(paths, opts, opts.preview_path)
         render_preview_svg(paths, opts, opts.preview_path.with_suffix(".svg"))
-    return emit_gcode(paths, opts)
+        _progress(opts, f"preview written ({time.time() - t0:.1f}s)")
+    _progress(opts, f"emitting g-code for {len(paths)} toolpaths...")
+    gcode = emit_gcode(paths, opts)
+    _progress(opts, f"done in {time.time() - t_start:.1f}s")
+    return gcode
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1390,6 +1470,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-markers", action="store_true", help="Do not carve marker-start/-end arrowheads")
     p.add_argument("--preview", nargs="?", const="__AUTO__", default=None,
                    help="Also write a depth-coloured toolpath preview PNG (defaults to <out>.png)")
+    p.add_argument("--quiet", action="store_true", help="Suppress progress output")
     p.add_argument("--tool", default=None, help="Tool id/name; supplies half-angle, feeds, RPM defaults")
     args = p.parse_args(argv)
 
@@ -1435,6 +1516,7 @@ def main(argv: list[str] | None = None) -> int:
             else (args.out.with_suffix(".png") if args.preview == "__AUTO__" else Path(args.preview))
         ),
         bit_diameter_mm=(tool.diameter_mm if tool is not None else None),
+        progress=not args.quiet,
     )
     if args.pitch <= 0:
         p.error("--pitch must be > 0")
