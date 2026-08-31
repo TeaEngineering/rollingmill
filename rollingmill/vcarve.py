@@ -131,6 +131,7 @@ class VCarveOpts:
     fill_arc_tol_mm: float = 0.06  # arc-fit tolerance for the (coarser) fill medial axis
     fill_pitch_mm: float = 0.05  # per-element raster pitch for fills (matches the old whole-page)
     preview_path: Path | None = None  # if set, also write a toolpath preview PNG
+    preview_pitch_mm: float = 0.25  # preview PNG resolution (mm/px); smaller = larger image
     bit_diameter_mm: float | None = None  # caps the preview's cone footprint radius
     progress: bool = False  # print progress to stdout (set by the CLI; silent as a library)
 
@@ -1249,10 +1250,17 @@ def _marker_specs(svg_path: Path, strokes: list[StrokeSpec], opts: VCarveOpts) -
     return out
 
 
-# Preview render resolution: an internal supersampled buffer (PPMM_SS px/mm) is
-# built, then box-downsampled by PREVIEW_SS for antialiasing.
-_PREVIEW_PPMM_SS = 8.0
+# The preview PNG is built at PREVIEW_SS x the requested output resolution
+# (``--preview-pitch`` mm/px) and box-downsampled by PREVIEW_SS for antialiasing.
 _PREVIEW_SS = 2
+
+
+def _preview_dims(opts: VCarveOpts) -> tuple[float, int, int, int, int]:
+    """Return (internal px/mm, internal w, internal h, output w, output h)."""
+    ppmm = _PREVIEW_SS / max(opts.preview_pitch_mm, 1e-6)
+    w = max(1, min(8000, round(opts.page_w_mm * ppmm)))
+    h = max(1, min(8000, round(opts.page_h_mm * ppmm)))
+    return ppmm, w, h, max(1, round(w / _PREVIEW_SS)), max(1, round(h / _PREVIEW_SS))
 
 
 def render_preview(paths: list[ToolPath], opts: VCarveOpts, out_png: Path) -> None:
@@ -1272,9 +1280,8 @@ def render_preview(paths: list[ToolPath], opts: VCarveOpts, out_png: Path) -> No
     tan_t = math.tan(math.radians(opts.half_angle_deg))
     d_max = max((p.max_depth for p in paths), default=0.0)
 
-    ppmm = _PREVIEW_PPMM_SS
-    w = max(1, min(6000, round(opts.page_w_mm * ppmm)))
-    h = max(1, min(6000, round(opts.page_h_mm * ppmm)))
+    # Internal (supersampled) resolution: SS x the requested output px/mm.
+    ppmm, w, h, _out_w, _out_h = _preview_dims(opts)
 
     # Stamp toolpath centreline depths into L (max where paths overlap), sampling
     # each segment at ~pixel spacing with interpolated depth.
@@ -1329,9 +1336,7 @@ def render_preview(paths: list[ToolPath], opts: VCarveOpts, out_png: Path) -> No
     rgb = np.stack([r_ch, g_ch, b_ch], axis=-1).clip(0, 255).astype("uint8")
 
     img = Image.fromarray(rgb, "RGB")
-    out_w = max(1, round(w / _PREVIEW_SS))
-    out_h = max(1, round(h / _PREVIEW_SS))
-    img = img.resize((out_w, out_h), Image.LANCZOS)
+    img = img.resize((_out_w, _out_h), Image.LANCZOS)
     out_png.parent.mkdir(parents=True, exist_ok=True)
     img.save(out_png)
 
@@ -1423,11 +1428,16 @@ def run(svg_or_png: Path, opts: VCarveOpts, is_png: bool) -> str:
                 except Exception as e:  # markers are best-effort; never fail the carve
                     print(f"warning: could not expand markers ({e}); arrowheads skipped")
     if opts.preview_path is not None:
-        _progress(opts, f"rendering preview {opts.preview_path.name} + .svg ({len(paths)} paths)...")
+        out_svg = opts.preview_path.with_suffix(".svg")
+        _, _, _, ow, oh = _preview_dims(opts)
+        _progress(opts, f"writing PNG preview {opts.preview_path.name} ({_fmt(opts.preview_pitch_mm)}mm/px, {ow}x{oh}px)...")
         t0 = time.time()
         render_preview(paths, opts, opts.preview_path)
-        render_preview_svg(paths, opts, opts.preview_path.with_suffix(".svg"))
-        _progress(opts, f"preview written ({time.time() - t0:.1f}s)")
+        _progress(opts, f"  wrote {opts.preview_path.name} ({time.time() - t0:.1f}s)")
+        _progress(opts, f"writing SVG preview {out_svg.name}...")
+        t1 = time.time()
+        render_preview_svg(paths, opts, out_svg)
+        _progress(opts, f"  wrote {out_svg.name} ({time.time() - t1:.1f}s)")
     _progress(opts, f"emitting g-code for {len(paths)} toolpaths...")
     gcode = emit_gcode(paths, opts)
     _progress(opts, f"done in {time.time() - t_start:.1f}s")
@@ -1470,6 +1480,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-markers", action="store_true", help="Do not carve marker-start/-end arrowheads")
     p.add_argument("--preview", nargs="?", const="__AUTO__", default=None,
                    help="Also write a depth-coloured toolpath preview PNG (defaults to <out>.png)")
+    p.add_argument("--preview-pitch", type=float, default=0.25,
+                   help="Preview PNG resolution mm/px (default 0.25; smaller = larger image)")
     p.add_argument("--quiet", action="store_true", help="Suppress progress output")
     p.add_argument("--tool", default=None, help="Tool id/name; supplies half-angle, feeds, RPM defaults")
     args = p.parse_args(argv)
@@ -1515,6 +1527,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.preview is None
             else (args.out.with_suffix(".png") if args.preview == "__AUTO__" else Path(args.preview))
         ),
+        preview_pitch_mm=args.preview_pitch,
         bit_diameter_mm=(tool.diameter_mm if tool is not None else None),
         progress=not args.quiet,
     )
