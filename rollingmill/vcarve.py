@@ -1312,17 +1312,22 @@ def render_preview(paths: list[ToolPath], opts: VCarveOpts, out_png: Path) -> No
         np.maximum.at(L, (yi, xi), np.array(ds))
 
     if d_max > 0.0 and xs:
-        # Conical structuring element: dilating L by it gives, per pixel, the max
-        # over nearby toolpath of (D - dist/tan_t) -- exactly the V-groove wall.
+        # Spread each centreline depth into its V-groove: depth = max over nearby
+        # toolpath of (D - dist/tan_t). A single big conical kernel is exact but
+        # slow; because a cone dilated by a cone is a wider cone of the same
+        # slope, we iterate a small conical dilation instead -- a few passes
+        # rebuild the same envelope for a fraction of the cost.
         r_mm = d_max * tan_t
         if opts.bit_diameter_mm is not None:
             r_mm = min(r_mm, opts.bit_diameter_mm / 2.0)
-        r_px = max(1, math.ceil(r_mm * ppmm))
-        yy, xx = np.mgrid[-r_px : r_px + 1, -r_px : r_px + 1]
-        dist_mm = np.hypot(xx, yy) / ppmm
-        footprint = dist_mm <= r_mm + 1e-9
-        structure = np.where(footprint, -dist_mm / tan_t, 0.0)
-        depth = grey_dilation(L, footprint=footprint, structure=structure)
+        rk = 3  # small-kernel radius in px
+        yy, xx = np.mgrid[-rk : rk + 1, -rk : rk + 1]
+        dloc = np.hypot(xx, yy) / ppmm
+        footprint = dloc <= rk / ppmm + 1e-9
+        structure = np.where(footprint, -dloc / tan_t, 0.0)
+        depth = L
+        for _ in range(max(1, math.ceil(r_mm * ppmm / rk))):
+            depth = grey_dilation(depth, footprint=footprint, structure=structure)
         np.maximum(depth, 0.0, out=depth)
     else:
         depth = L
