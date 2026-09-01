@@ -5,27 +5,25 @@ This is a *general-purpose* V-carve engine that treats an SVG the way you'd
 want a sign carved: it classifies every shape as either a **filled region** or
 a **stroke-only path** and handles each correctly.
 
-  * **Filled regions** (e.g. bold letterforms) are rendered to a bitmap via
-    Inkscape and carved along their **medial axis**, plunging deeper where the
+  * **Filled regions** (e.g. bold letterforms) are carved along their **medial
+    axis**, computed directly from the vector outline as the interior of the
+    boundary's Voronoi diagram (no rasterisation), plunging deeper where the
     shape is wider so the V-bit's rim just touches the edges -- tapering to
-    sharp points at terminals.
+    sharp points at terminals. This is robust where a raster skeletoniser
+    collapses clean convex glyphs (a diamond) or drops tiny dots (a colon).
   * **Stroke-only paths** (a logo outline, an arrow) are carved along their
     **vector centreline** at a *constant* depth fixed by the declared stroke
-    width. Reading the width directly avoids the two failure modes of
-    rasterising a stroke: anti-aliased edges crossing the ink threshold (which
-    makes the groove too deep), and self-intersections/arrowheads where the
-    filled union is wider than the line (which makes the medial axis dive).
+    width.
 
 Both share one depth rule set by the bit's half-angle ``t``. At depth ``d`` the
 cone has radius ``r = d * tan(t)``, so to make the rim touch edges a clearance
 ``r`` away we plunge to ``d = r / tan(t)``. For a filled region ``r`` is the
 local medial clearance; for a stroke of width ``w`` it is ``w / 2`` (constant).
 
-The heavy dependencies (numpy, scipy, scikit-image, pillow, svgelements) are
-optional and
-imported lazily, matching :mod:`rollingmill.relief3D`. Rendering needs the
-``inkscape`` CLI on ``PATH`` (or pass a pre-rendered PNG mask via ``--png``,
-which is also how the tests exercise the geometry without Inkscape).
+Everything works from the SVG vector geometry via svgelements -- convert text
+to paths in the editor first. The heavy dependencies (numpy, scipy, pillow,
+svgelements, plus scikit-image for the ``--png`` raster fallback) are optional
+and imported lazily, matching :mod:`rollingmill.relief3D`.
 
 Output is single-tool g-code streamable via ``rollingmill --file out.gcode``.
 """
@@ -34,10 +32,7 @@ from __future__ import annotations
 
 import argparse
 import math
-import shutil
-import subprocess
 import sys
-import tempfile
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -122,14 +117,14 @@ class VCarveOpts:
     spindle_rpm: int = 14000
     return_home: bool = False
     workspace: str | None = None
-    inkscape_bin: str = "inkscape"
     stroke_flatten_mm: float = 0.3  # curve sampling step for stroke centrelines
     markers: bool = True  # expand marker-start/-end (arrowheads) into grooves
     arcs: bool = True  # fit circular stroke runs to G02/G03 arcs
     arc_tol_mm: float = 0.02  # max deviation when fitting an arc to a stroke run
     fill_arcs: bool = False  # opt-in: fit circular fill medial-axis runs to arcs (helix in Z)
     fill_arc_tol_mm: float = 0.06  # arc-fit tolerance for the (coarser) fill medial axis
-    fill_pitch_mm: float = 0.05  # per-element raster pitch for fills (matches the old whole-page)
+    medial_step_mm: float = 0.15  # boundary sampling step for the vector (Voronoi) fill medial
+    medial_hair_adj: int = 2  # prune Voronoi edges between boundary samples this close on a ring
     preview_path: Path | None = None  # if set, also write a toolpath preview PNG
     preview_pitch_mm: float = 0.25  # preview PNG resolution (mm/px); smaller = larger image
     bit_diameter_mm: float | None = None  # caps the preview's cone footprint radius
@@ -204,6 +199,9 @@ def _trace_skeleton(skel) -> list[list[tuple[int, int]]]:
     # Branches anchored on nodes (endpoints/junctions).
     nodes = [p for p in pts if deg(p) != 2]
     for n in nodes:
+        if deg(n) == 0:  # isolated pixel (e.g. a tiny dot's 1-px medial) -> a point
+            polylines.append([n])
+            continue
         for nb in list(nbrs[n]):
             if key(n, nb) in visited:
                 continue
@@ -345,10 +343,61 @@ def _polylines_to_toolpaths(polylines, dist, ox_mm, oy_mm, pitch, opts: VCarveOp
     return out
 
 
+_RIDGE_GRAD_MAX = 0.85  # medial ridge = where the distance-transform gradient dips below 1
+
+
+def _medial_ridge_skel(mask):
+    """Skeleton from the distance-transform *ridge* (where |grad(EDT)| dips below
+    1). Unlike thinning-based ``medial_axis``, this does not eat the geometric
+    arms of a convex polygon -- but it is noisier, so it's used only to repair
+    the few shapes ``medial_axis`` collapses (see :func:`_medial_skeleton`)."""
+    np, _, _ = _require_deps()
+    from scipy.ndimage import distance_transform_edt
+    from skimage.morphology import skeletonize
+
+    edt = distance_transform_edt(mask)
+    gy, gx = np.gradient(edt)
+    return skeletonize(mask & (np.hypot(gx, gy) < _RIDGE_GRAD_MAX))
+
+
+def _medial_skeleton(mask):
+    """Medial-axis skeleton + clearance, robust to convex collapse.
+
+    ``skimage.medial_axis`` is clean for typical glyphs but, being thinning-based,
+    collapses clean *convex polygons* (e.g. a filled diamond) to a couple of
+    pixels -- which then carve as a round dot instead of a diamond. We keep
+    ``medial_axis`` everywhere, then per connected component detect a collapse
+    (skeleton far too short for the shape) that is *not* genuinely round (a disk
+    or tiny dot has a point medial legitimately) and repair only those with the
+    distance-ridge skeleton."""
+    np, _, medial_axis = _require_deps()
+    from scipy.ndimage import label
+
+    skel, dist = medial_axis(mask, return_distance=True)
+    lbl, ncc = label(mask)
+    ridge = None
+    for i in range(1, ncc + 1):
+        comp = lbl == i
+        area = int(comp.sum())
+        if area < 60:  # tiny dots: medial_axis handles them; ridge would just add noise
+            continue
+        ys, xs = np.nonzero(comp)
+        maxdim = max(int(xs.max() - xs.min()), int(ys.max() - ys.min())) + 1
+        if int((skel & comp).sum()) >= 0.2 * maxdim:
+            continue  # skeleton long enough -> not collapsed
+        r = float(dist[comp].max())
+        if 1.0 - min(1.0, math.pi * r * r / area) < 0.1:
+            continue  # round (disk/dot): a point medial is correct, keep medial_axis
+        if ridge is None:  # non-round collapse (diamond, square, ...) -> repair
+            ridge = _medial_ridge_skel(mask)
+        skel = (skel & ~comp) | (ridge & comp)
+    return skel, dist
+
+
 def _mask_medial_polylines(mask, opts: VCarveOpts, pitch: float):
     """Medial axis of ``mask`` -> spur-pruned (row, col) polylines + dist array."""
-    np, _, medial_axis = _require_deps()
-    skel, dist = medial_axis(mask, return_distance=True)
+    np, _, _ = _require_deps()
+    skel, dist = _medial_skeleton(mask)
     polylines = _trace_skeleton(skel)
     rows, cols = np.nonzero(skel)
     pts = set(zip(rows.tolist(), cols.tolist(), strict=True))
@@ -365,67 +414,188 @@ def build_toolpaths(mask, opts: VCarveOpts) -> list[ToolPath]:
     return _polylines_to_toolpaths(polylines, dist, 0.0, 0.0, opts.pitch_mm, opts)
 
 
-def _render_element_mask(svg_path: Path, elem_id: str, opts: VCarveOpts):
-    """Render one filled SVG element to an ink mask at ``fill_pitch_mm``.
-
-    Uses ``--export-id --export-id-only`` so only that object's own bbox is
-    rasterised, keeping high DPI cheap. Returns the boolean mask."""
-    np, Image, _ = _require_deps()
-    exe = shutil.which(opts.inkscape_bin)
-    if exe is None:
-        raise SystemExit(
-            f"could not find the {opts.inkscape_bin!r} executable on PATH.\n"
-            "Install Inkscape, or pre-render the page and pass --png <mask.png>."
-        )
-    dpi = 25.4 / opts.fill_pitch_mm
-    with tempfile.TemporaryDirectory() as td:
-        png = Path(td) / "e.png"
-        cmd = [
-            exe,
-            "--export-type=png",
-            f"--export-id={elem_id}",
-            "--export-id-only",
-            "--export-background=white",
-            "--export-background-opacity=1",
-            f"--export-dpi={dpi}",
-            f"--export-filename={png}",
-            str(svg_path),
-        ]
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-        if not png.exists():
-            raise SystemExit(
-                f"inkscape failed to render element {elem_id!r}:\n"
-                + (proc.stderr or proc.stdout or "(no output)")
-            )
-        return np.asarray(Image.open(png).convert("L")) < opts.threshold
+# --- vector medial axis (Voronoi of the boundary) ---------------------------
+# The medial axis is the interior subset of the Voronoi diagram of the shape's
+# densely-sampled outline, with the "whiskers" toward each boundary sample
+# pruned. Computed straight from the SVG vector outline -- no rasterisation, so
+# it is robust where a raster skeletoniser collapses clean convex glyphs (a
+# filled diamond) or drops tiny dots, and it needs no Inkscape/DPI.
 
 
-def build_fill_toolpaths(svg_path: Path, fill_elems, opts: VCarveOpts) -> list[ToolPath]:
-    """Per-element high-DPI fill carve: render each filled element on its own
-    bbox, medial-axis it, and map back to page millimetres.
+def _close_ring(ring):
+    return list(ring) + [ring[0]] if len(ring) >= 2 and ring[0] != ring[-1] else list(ring)
 
-    The element bbox is tight, so ink often touches the raster border (e.g. a
-    text line's stems span its full height). ``medial_axis``/the distance
-    transform have no background beyond the edge there, which inflates the
-    clearance -> depth along border-touching strokes. Padding the mask with a
-    background margin gives every edge a true exterior, fixing the medial axis."""
+
+def _sample_rings(rings, step):
+    """Sample every ring outline at ~``step`` spacing. Returns points (Nx2) and a
+    parallel ``owner`` list of (ring_index, position_along_ring) per point."""
     np, _, _ = _require_deps()
+    pts: list[tuple[float, float]] = []
+    owner: list[tuple[int, int]] = []
+    for rid, ring in enumerate(rings):
+        r = _close_ring(ring)
+        pos = 0
+        for i in range(len(r) - 1):
+            ax, ay = r[i]
+            bx, by = r[i + 1]
+            n = max(1, int(math.ceil(math.hypot(bx - ax, by - ay) / step)))
+            for k in range(n):
+                f = k / n
+                pts.append((ax + (bx - ax) * f, ay + (by - ay) * f))
+                owner.append((rid, pos))
+                pos += 1
+    return np.asarray(pts, dtype=float), owner
+
+
+def _point_in_polygon(P, rings):
+    """Even-odd inside test for query points ``P`` (Nx2) vs ``rings`` (counters
+    handled by the odd-crossing rule). Vectorised over ``P``."""
+    np, _, _ = _require_deps()
+    inside = np.zeros(len(P), dtype=bool)
+    px, py = P[:, 0], P[:, 1]
+    for ring in rings:
+        r = _close_ring(ring)
+        for i in range(len(r) - 1):
+            x1, y1 = r[i]
+            x2, y2 = r[i + 1]
+            cond = (y1 > py) != (y2 > py)
+            xint = x1 + (py - y1) * (x2 - x1) / ((y2 - y1) + 1e-12)
+            inside ^= cond & (px < xint)
+    return inside
+
+
+def _trace_graph(adj):
+    """Trace an undirected graph (node -> set of neighbours) into polylines of
+    node indices: branches between degree!=2 nodes, plus any pure loops."""
+    deg = {v: len(ns) for v, ns in adj.items()}
+    visited: set[tuple[int, int]] = set()
+
+    def key(a, b):
+        return (a, b) if a <= b else (b, a)
+
+    def walk(s, f):
+        path = [s, f]
+        visited.add(key(s, f))
+        prev, cur = s, f
+        while deg.get(cur, 0) == 2:
+            nxt = [x for x in adj[cur] if x != prev]
+            if not nxt or key(cur, nxt[0]) in visited:
+                break
+            visited.add(key(cur, nxt[0]))
+            prev, cur = cur, nxt[0]
+            path.append(cur)
+        return path
+
+    polys = []
+    for v in [v for v in adj if deg[v] != 2]:
+        for nb in list(adj[v]):
+            if key(v, nb) not in visited:
+                polys.append(walk(v, nb))
+    for v in adj:  # remaining pure loops (all degree 2)
+        if deg[v] == 2:
+            for nb in adj[v]:
+                if key(v, nb) not in visited:
+                    polys.append(walk(v, nb))
+                    break
+    return polys, deg
+
+
+def _voronoi_medial(rings, opts: VCarveOpts):
+    """Medial axis of the polygon ``rings`` (SVG mm) as polylines of
+    ``(x, y, clearance_mm)``, via the Voronoi diagram of its sampled boundary."""
+    import collections
+
+    np, _, _ = _require_deps()
+    from scipy.spatial import Voronoi, cKDTree
+
+    allp = np.array([p for r in rings for p in r], dtype=float) if rings else np.zeros((0, 2))
+    maxdim = float(np.ptp(allp, axis=0).max()) if len(allp) else 0.0
+
+    def dot():  # degenerate (tiny/round) -> a single plunge point at the centroid
+        if not len(allp):
+            return []
+        c = allp.mean(axis=0)
+        clr = float(np.min(np.hypot(allp[:, 0] - c[0], allp[:, 1] - c[1]))) or maxdim / 2.0
+        return [[(float(c[0]), float(c[1]), clr)]]
+
+    B, owner = _sample_rings(rings, opts.medial_step_mm)
+    if len(B) < 4 or maxdim <= 0:
+        return dot()
+    try:
+        vor = Voronoi(B)
+    except Exception:
+        return dot()
+    V = vor.vertices
+    if len(V) == 0:
+        return dot()
+    inside = _point_in_polygon(V, rings)
+    clr, _idx = cKDTree(B).query(V)
+    valid = inside & np.isfinite(clr) & (clr < maxdim)  # drop numerical junk vertices
+
+    ring_counts = collections.Counter(o[0] for o in owner)
+    adj: dict[int, set[int]] = collections.defaultdict(set)
+    for (a, b), (p, q) in zip(vor.ridge_vertices, vor.ridge_points, strict=True):
+        if a < 0 or b < 0 or not (valid[a] and valid[b]):
+            continue
+        (rp, ip), (rq, iq) = owner[p], owner[q]
+        if rp == rq:  # whisker: bisector of two nearby samples on the same ring
+            n = ring_counts[rp]
+            if min((ip - iq) % n, (iq - ip) % n) <= opts.medial_hair_adj:
+                continue
+        adj[a].add(b)
+        adj[b].add(a)
+    if not adj:
+        return dot()
+
+    polys, deg = _trace_graph(adj)
+    # Drop residual short endpoint spurs (keep real arms/corner spurs).
+    def keep(pl):
+        if deg.get(pl[0], 0) != 1 and deg.get(pl[-1], 0) != 1:
+            return True
+        length = sum(math.dist(V[pl[i]], V[pl[i + 1]]) for i in range(len(pl) - 1))
+        return length >= opts.prune_mm
+    polys = [pl for pl in polys if keep(pl)]
+
+    out = [[(float(V[i][0]), float(V[i][1]), float(clr[i])) for i in pl] for pl in polys]
+    return out or dot()
+
+
+def _clearance_polylines_to_toolpaths(polys, opts: VCarveOpts) -> list[ToolPath]:
+    """(x_svg, y_svg, clearance_mm) medial polylines -> machine-space ToolPaths.
+
+    Depth = clearance/tan(t); Y is flipped to the bed; short faint features are
+    floored to ``--min-depth``; optional ``--fill-arcs`` fits circular runs."""
+    out: list[ToolPath] = []
+    for pl in polys:
+        raw = [
+            (opts.x0 + x, opts.y0 + (opts.page_h_mm - y), _depth_from_clearance(clr, opts))
+            for (x, y, clr) in pl
+        ]
+        if opts.min_depth_mm > 0.0 and raw and max(p[2] for p in raw) < opts.min_depth_mm:
+            raw = [(x, y, opts.min_depth_mm) for (x, y, _z) in raw]
+        verts = _rdp(raw, opts.chord_tol_mm)
+        arcs: dict[int, tuple[float, float, bool]] = {}
+        if opts.fill_arcs and len(verts) >= 3:
+            xy = [(x, y) for (x, y, _z) in verts]
+            vidx, arcs = _fit_arcs(xy, opts.fill_arc_tol_mm, opts.chord_tol_mm)
+            verts = [verts[i] for i in vidx]
+        if len(verts) >= 2 or (len(verts) == 1 and verts[0][2] > 0):
+            out.append(ToolPath(verts, arcs))
+    return out
+
+
+def build_fill_toolpaths(fill_elems, opts: VCarveOpts) -> list[ToolPath]:
+    """Vector medial-axis carve: compute the Voronoi medial of each filled
+    element's outline directly (no rasterisation) and convert to toolpaths."""
     out: list[ToolPath] = []
     n = len(fill_elems)
-    for k, (elem_id, bbox) in enumerate(fill_elems, 1):
-        if not elem_id:
+    for k, (elem_id, rings) in enumerate(fill_elems, 1):
+        if not rings:
             continue
-        x0, y0, x1, y1 = bbox
         t0 = time.time()
-        _progress(opts, f"fill {k}/{n} {elem_id!r} ({x1 - x0:.0f}x{y1 - y0:.0f}mm @{opts.fill_pitch_mm}mm): rendering + medial axis...")
-        mask = _render_element_mask(svg_path, elem_id, opts)
-        h, w = mask.shape
-        pitch = ((x1 - x0) / w + (y1 - y0) / h) / 2.0  # actual mm/px from render (pre-pad)
-        pad = max(2, math.ceil(0.5 / pitch))  # ~0.5 mm background border
-        mask = np.pad(mask, pad, mode="constant", constant_values=False)
-        polylines, dist = _mask_medial_polylines(mask, opts, pitch)
-        # padded pixel (0,0) sits `pad` px left/above the element's bbox origin
-        tps = _polylines_to_toolpaths(polylines, dist, x0 - pad * pitch, y0 - pad * pitch, pitch, opts)
+        _progress(opts, f"fill {k}/{n} {elem_id!r} ({len(rings)} ring(s)): vector medial...")
+        polys = _voronoi_medial(rings, opts)
+        tps = _clearance_polylines_to_toolpaths(polys, opts)
         out += tps
         _progress(opts, f"fill {k}/{n} {elem_id!r}: {len(tps)} toolpaths ({time.time() - t0:.1f}s)")
     return out
@@ -555,15 +725,6 @@ def emit_gcode(paths: list[ToolPath], opts: VCarveOpts) -> str:
 # svgelements is parsed at ppi=25.4 so that a "300mm" page with a 0..300
 # viewBox yields coordinates and stroke widths directly in millimetres.
 _PPI_MM = 25.4
-
-# SVG namespaces we round-trip through ElementTree without prefix mangling.
-_SVG_NS = {
-    "": "http://www.w3.org/2000/svg",
-    "svg": "http://www.w3.org/2000/svg",
-    "inkscape": "http://www.inkscape.org/namespaces/inkscape",
-    "sodipodi": "http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd",
-    "xlink": "http://www.w3.org/1999/xlink",
-}
 
 
 @dataclass
@@ -1082,21 +1243,22 @@ def _stroke_toolpaths(spec: StrokeSpec, opts: VCarveOpts) -> list[ToolPath]:
 
 def parse_svg_features(
     svg_path: Path, opts: VCarveOpts
-) -> tuple[set[str], list[StrokeSpec], list[tuple[str, tuple[float, float, float, float]]]]:
+) -> tuple[set[str], list[StrokeSpec], list[tuple[str, list[list[tuple[float, float]]]]]]:
     """Classify shapes; return (stroke ids, stroke specs, filled elements).
 
-    Each filled element is ``(id, (x0, y0, x1, y1))`` in millimetres, so it can
-    be rendered on its own bbox. The list is falsy when there are no fills."""
+    Each filled element is ``(id, rings)`` where ``rings`` is the element's
+    outline flattened to closed polylines in millimetres (outer + counters), for
+    the vector medial axis. The list is falsy when there are no fills."""
     stroke_ids: set[str] = set()
     strokes: list[StrokeSpec] = []
-    fill_elems: list[tuple[str, tuple[float, float, float, float]]] = []
+    fill_elems: list[tuple[str, list[list[tuple[float, float]]]]] = []
     for _svgelements, e in _svg_shapes(svg_path):
         kind = _classify(e)
         if kind == "fill":
-            eid = e.values.get("id")
-            bb = e.bbox()
-            if eid and bb is not None:
-                fill_elems.append((eid, (float(bb[0]), float(bb[1]), float(bb[2]), float(bb[3]))))
+            eid = e.values.get("id") or f"fill{len(fill_elems)}"
+            rings = [pts for pts, _cf in _flatten(e, opts.medial_step_mm) if len(pts) >= 3]
+            if rings:
+                fill_elems.append((eid, rings))
         elif kind == "stroke":
             eid = e.values.get("id")
             if eid:
@@ -1120,30 +1282,6 @@ def parse_svg_features(
                     )
                 )
     return stroke_ids, strokes, fill_elems
-
-
-_SHAPE_TAGS = ("path", "rect", "circle", "ellipse", "line", "polyline", "polygon")
-
-
-def _ensure_ids(svg_path: Path, dst: Path) -> None:
-    """Copy ``svg_path`` to ``dst``, assigning an id to any shape lacking one, so
-    every filled element can be targeted individually by ``--export-id``."""
-    import xml.etree.ElementTree as ET
-
-    for prefix, uri in _SVG_NS.items():
-        ET.register_namespace(prefix, uri)
-    tree = ET.parse(svg_path)
-    seen = {n.get("id") for n in tree.getroot().iter() if n.get("id")}
-    k = 0
-    for n in tree.getroot().iter():
-        if n.tag.split("}")[-1] in _SHAPE_TAGS and not n.get("id"):
-            while f"vc{k}" in seen:
-                k += 1
-            n.set("id", f"vc{k}")
-            seen.add(f"vc{k}")
-            k += 1
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    tree.write(dst, xml_declaration=True, encoding="utf-8")
 
 
 # --- marker (arrowhead) expansion -------------------------------------------
@@ -1411,27 +1549,24 @@ def run(svg_or_png: Path, opts: VCarveOpts, is_png: bool) -> str:
         paths = build_toolpaths(load_png_to_mask(svg_or_png, opts.threshold), opts)
         _progress(opts, f"{len(paths)} toolpaths from mask")
     else:
-        with tempfile.TemporaryDirectory() as td:
-            work = Path(td) / "work.svg"
-            _progress(opts, f"parsing {svg_or_png.name}...")
-            _ensure_ids(svg_or_png, work)  # give every shape an id for per-element render
-            _stroke_ids, strokes, fill_elems = parse_svg_features(work, opts)
-            _progress(opts, f"{len(fill_elems)} filled element(s), {len(strokes)} stroke(s)")
-            if fill_elems:
-                paths += build_fill_toolpaths(work, fill_elems, opts)
-            n0 = len(paths)
-            for spec in strokes:
-                paths += _stroke_toolpaths(spec, opts)
-            _progress(opts, f"strokes: {len(paths) - n0} toolpaths")
-            if opts.markers:
-                n1 = len(paths)
-                try:
-                    for mspec in _marker_specs(work, strokes, opts):
-                        paths += _stroke_toolpaths(mspec, opts)
-                    if len(paths) > n1:
-                        _progress(opts, f"markers: {len(paths) - n1} toolpaths")
-                except Exception as e:  # markers are best-effort; never fail the carve
-                    print(f"warning: could not expand markers ({e}); arrowheads skipped")
+        _progress(opts, f"parsing {svg_or_png.name}...")
+        _stroke_ids, strokes, fill_elems = parse_svg_features(svg_or_png, opts)
+        _progress(opts, f"{len(fill_elems)} filled element(s), {len(strokes)} stroke(s)")
+        if fill_elems:
+            paths += build_fill_toolpaths(fill_elems, opts)
+        n0 = len(paths)
+        for spec in strokes:
+            paths += _stroke_toolpaths(spec, opts)
+        _progress(opts, f"strokes: {len(paths) - n0} toolpaths")
+        if opts.markers:
+            n1 = len(paths)
+            try:
+                for mspec in _marker_specs(svg_or_png, strokes, opts):
+                    paths += _stroke_toolpaths(mspec, opts)
+                if len(paths) > n1:
+                    _progress(opts, f"markers: {len(paths) - n1} toolpaths")
+            except Exception as e:  # markers are best-effort; never fail the carve
+                print(f"warning: could not expand markers ({e}); arrowheads skipped")
     if opts.preview_path is not None:
         out_svg = opts.preview_path.with_suffix(".svg")
         _, _, _, ow, oh = _preview_dims(opts)
@@ -1466,7 +1601,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--stepdown", type=float, default=0.6, help="Max depth per pass mm (default 0.6)")
     p.add_argument("--prune", type=float, default=0.4, help="Drop skeleton spurs shorter than mm (default 0.4)")
     p.add_argument("--chord-tol", type=float, default=0.05, help="Toolpath decimation tol mm (default 0.05)")
-    p.add_argument("--fill-pitch", type=float, default=0.05, help="Per-element raster pitch for fills mm (default 0.05)")
+    p.add_argument("--medial-step", type=float, default=0.15, help="Boundary sampling step for the vector fill medial mm (default 0.15)")
     p.add_argument("--fill-arcs", action="store_true", help="Fit fill medial-axis runs to circular/helical arcs (default off)")
     p.add_argument("--fill-arc-tol", type=float, default=0.06, help="Arc-fit tolerance for fills mm (default 0.06)")
     p.add_argument("--x0", type=float, default=0.0, help="Page origin X on bed mm (default 0)")
@@ -1478,7 +1613,6 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--spindle-rpm", type=int, default=None, help="Spindle RPM (default 14000, or from --tool)")
     p.add_argument("--return-home", action="store_true", help="Append G00 X0 Y0 at end")
     p.add_argument("--workspace", default=None, choices=["G54", "G55", "G56", "G57", "G58", "G59"], help="Workspace offset to select")
-    p.add_argument("--inkscape", default="inkscape", help="Inkscape executable (default 'inkscape')")
     p.add_argument("--stroke-flatten", type=float, default=0.3, help="Curve sampling step for stroke centrelines mm (default 0.3)")
     p.add_argument("--no-arcs", action="store_true", help="Do not fit circular stroke runs to G02/G03 arcs")
     p.add_argument("--arc-tol", type=float, default=0.02, help="Max deviation when fitting a stroke arc mm (default 0.02)")
@@ -1519,14 +1653,13 @@ def main(argv: list[str] | None = None) -> int:
         spindle_rpm=_resolve(args.spindle_rpm, tool, "spindle_rpm", 14000),
         return_home=args.return_home,
         workspace=args.workspace,
-        inkscape_bin=args.inkscape,
         stroke_flatten_mm=args.stroke_flatten,
         markers=not args.no_markers,
         arcs=not args.no_arcs,
         arc_tol_mm=args.arc_tol,
         fill_arcs=args.fill_arcs,
         fill_arc_tol_mm=args.fill_arc_tol,
-        fill_pitch_mm=args.fill_pitch,
+        medial_step_mm=args.medial_step,
         preview_path=(
             None
             if args.preview is None

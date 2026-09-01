@@ -272,6 +272,42 @@ Then load on the machine: `rollingmill --file /tmp/maze.gcode`.
 
  ![Drawing mazes](docs/screenshots/mazes.png)
 
+V-carving an SVG
+-----
+
+`rollingmill.vcarve` is a general-purpose SVG → G-code converter for a V-bit. It classifies every shape as either a **filled region** or a **stroke-only path** and carves each the right way. A V-bit's groove width and depth are locked together by its half-angle (`depth = clearance / tan(half_angle)`), so:
+
+* **filled regions** (bold letterforms, solid logos) are carved along their **medial axis** — plunging deeper where the shape is wider, tapering to sharp points at terminals (classic sign-carving). The medial axis is computed **directly from the vector outline** — the interior of the boundary's Voronoi diagram (`--medial-step` sets how finely the outline is sampled, default 0.15 mm) — with no rasterisation. That is robust where a raster skeletoniser fails: it keeps a clean convex glyph like a diamond (◆) as its full cross instead of collapsing it to a dot, and never loses a tiny dot like the one on a colon. Optionally, `--fill-arcs` fits curved medial runs (the bowls of O/C/S/R) to **G02/G03 arcs**, emitted as **helices** (`G0{2,3} X Y Z I J`) where the fill's depth ramps along the curve (`--fill-arc-tol` sets the tolerance); by default fills emit `G01` only. And
+* **stroke-only paths** (a logo outline, an arrow) are carved along their **vector centreline** at a *constant* depth read directly from the declared stroke width. Using the vector width — rather than rasterising the stroke — avoids cutting too deep where anti-aliased edges blur the line, or where strokes cross and their filled union looks wider than the line really is. Marker arrowheads (`marker-start`/`marker-end`) are expanded and carved too.
+
+  Where a run of a stroke lies on a circle, it is emitted as a native **G02/G03 arc** rather than a chain of short line moves — faster and more accurate on the mill, and a smaller program. Only **curve-origin** geometry (SVG `A` arcs, or Bézier curves, and medial runs) is an arc candidate; straight **line** segments are never arc-fitted, so a sharp corner between two lines (e.g. a triangle vertex) stays a crisp corner instead of being rounded into a tiny arc. `--arc-tol` sets the fitting tolerance (default 0.02 mm) and `--no-arcs` disables it.
+
+  A plain centreline groove would round off convex corners (by half the stroke width) and line ends. To recover the sharp features, the stroke's **join and cap style** drives short *sharpening spurs* that ramp the cut to zero depth right at the point: a **miter** join gets a spur along the outer bisector to the miter tip (falling back to **bevel** past `stroke-miterlimit`), **butt**/**square** caps get squared ends, and **round** joins/caps are left as-is (the V-bit already rounds them). So a stroked triangle carves with crisp corners, not radiused ones.
+
+Prep the SVG in Inkscape first: convert text to paths (`Path ▸ Object to Path`), delete any raster tracing images, and set the document size to your workspace. Fills *and* strokes (any colour) are carved; a stroke's depth follows its width, so set line weights deliberately (e.g. 1 mm ≈ 0.87 mm deep with a 60° bit).
+
+V-carving needs the `vcarve` extra (everything is read from the SVG vectors — no Inkscape at run time):
+
+```
+pip install "rollingmill[vcarve]"
+```
+
+Then:
+
+```
+python -m rollingmill.vcarve \
+    --svg drawing.svg \
+    --tool vbit_60 \
+    --page-w 300 --page-h 300 \
+    --max-depth 3 --stepdown 0.6 --min-depth 0.3 \
+    --workspace G54 \
+    --out /tmp/vcarve.gcode
+```
+
+The page is mapped 1:1 onto the bed with the SVG's top-left at `(--x0, --y0)` and the Y axis flipped to the machine's front-left origin. `--medial-step` sets how finely a filled outline is sampled for the Voronoi medial (mm, default 0.15); finer resolves narrow necks and small counters at the cost of speed. Depth is clamped to `--max-depth` and reached in `--stepdown` roughing passes; `--min-depth` floors faint filled grooves without blunting the sharp letter terminals (it does not affect strokes, whose depth is exact from their width). `--stroke-flatten` controls how finely curved strokes are sampled, and `--no-markers` skips arrowhead expansion. `--preview` writes **two** companion files: a carved-surface **PNG** — modelling the swath the V-bit actually removes (a cone of radius `depth × tan(half_angle)` around each toolpath), colouring every pixel by the *deepest* cut reaching it (deep = blue, shallow = pale), supersampled and antialiased — and a vector **SVG** of the recovered toolpath centrelines, each a thin depth-coloured line (tool placement vs the PNG's removed area). Both are in the drawing's orientation; they default to `<out>.png`/`<out>.svg`, or pass `--preview path.png`. `--preview-pitch` sets the PNG resolution in mm/px (default 0.25 → ~1200 px for a 300 mm page; smaller makes a larger image). `--half-angle`, feeds and RPM default from the `--tool` entry. Pass `--png <mask.png>` instead of `--svg` to medial-axis a pre-rendered raster mask directly (the raster skeletoniser fallback, mainly for testing); `--pitch` then sets its mm/pixel resolution.
+
+Then load on the machine: `rollingmill --file /tmp/vcarve.gcode`.
+
 See also
 ----
 * [10maurycy10/gcode2rml](https://github.com/10maurycy10/gcode2rml) can translate g-code to RML

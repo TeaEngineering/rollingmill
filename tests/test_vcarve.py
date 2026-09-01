@@ -314,6 +314,46 @@ def test_fill_annulus_recovers_arcs():
     assert sum(len(t.arcs) for t in tps) >= 1  # ring recovered as arc(s)
 
 
+def test_convex_diamond_medial_does_not_collapse():
+    # A filled diamond (rotated square) is convex, so skimage.medial_axis/
+    # skeletonize collapse it to ~2 px (a "dot"). The distance-transform ridge
+    # must instead recover the NSEW "+" that spans the diamond.
+    n = 200
+    yy, xx = np.mgrid[0:n, 0:n]
+    diamond = (np.abs(xx - n / 2) + np.abs(yy - n / 2)) <= 80  # 8 mm half-diagonal at 0.1
+    opts = VCarveOpts(page_w_mm=20, page_h_mm=20, pitch_mm=0.1, half_angle_deg=45,
+                      max_depth_mm=20, prune_mm=0.5, fill_arcs=False)
+    tps = vcarve.build_toolpaths(diamond, opts)
+    xs = [p[0] for t in tps for p in t.pts]
+    ys = [p[1] for t in tps for p in t.pts]
+    assert tps and xs and ys
+    assert (max(xs) - min(xs)) > 10.0 and (max(ys) - min(ys)) > 10.0  # spans, not a dot
+
+
+def test_round_disk_keeps_clean_medial_not_noisy_ridge():
+    # A filled disk's medial axis is a point -> few toolpaths. The ridge repair
+    # (used for collapsed *non-round* shapes like a diamond) is noisy, so it must
+    # NOT be applied to a round disk (which would explode the toolpath count).
+    n = 200
+    yy, xx = np.mgrid[0:n, 0:n]
+    disk = np.hypot(xx - n / 2, yy - n / 2) <= 80
+    opts = VCarveOpts(page_w_mm=20, page_h_mm=20, pitch_mm=0.1, half_angle_deg=45,
+                      max_depth_mm=20, prune_mm=0.5)
+    assert len(vcarve.build_toolpaths(disk, opts)) < 30  # clean, not a ridge blow-up
+
+
+def test_tiny_dot_is_not_dropped():
+    # A 1 px-radius filled dot (e.g. a colon/period dot at small size): the ridge
+    # medial collapses to a single pixel, which _trace_skeleton must still emit
+    # as a point so the dot carves instead of vanishing.
+    n = 40
+    yy, xx = np.mgrid[0:n, 0:n]
+    dot = np.hypot(xx - n / 2, yy - n / 2) <= 1
+    opts = VCarveOpts(page_w_mm=4, page_h_mm=4, pitch_mm=0.05, half_angle_deg=45,
+                      max_depth_mm=10, min_depth_mm=0.3, prune_mm=0.4)
+    assert vcarve.build_toolpaths(dot, opts)  # at least one toolpath (not dropped)
+
+
 def test_fills_emit_no_arcs_by_default():
     n = 200
     yy, xx = np.mgrid[0:n, 0:n]
@@ -338,15 +378,28 @@ def test_helical_arc_emits_z_only_when_depth_ramps():
     assert "Z" not in flat_line  # constant depth -> planar arc, no Z
 
 
-def test_ensure_ids_assigns_ids_to_idless_shapes(tmp_path):
-    svg = _write_svg(tmp_path, '<rect x="1" y="1" width="5" height="5" fill="#000"/>'
-                     '<path id="keep" d="M0,0 L1,1" style="stroke:#000"/>')
-    dst = tmp_path / "work.svg"
-    vcarve._ensure_ids(svg, dst)
-    import xml.etree.ElementTree as ET
-    ids = [n.get("id") for n in ET.parse(dst).getroot().iter()
-           if n.tag.split("}")[-1] in ("rect", "path")]
-    assert "keep" in ids and all(i for i in ids)  # every shape now has an id
+def test_vector_medial_diamond_is_a_cross_not_a_dot():
+    pytest.importorskip("scipy")
+    # a filled diamond (rotated square) -> the vector medial must be the NSEW "+"
+    # reaching all four corners, not a collapsed point.
+    R = 6.0
+    ring = [(10 + R, 10), (10, 10 + R), (10 - R, 10), (10, 10 - R), (10 + R, 10)]
+    opts = VCarveOpts(page_w_mm=20, page_h_mm=20, half_angle_deg=45, max_depth_mm=20,
+                      min_depth_mm=0.0, prune_mm=0.5)
+    tps = vcarve.build_fill_toolpaths([("d", [ring])], opts)
+    xs = [p[0] for t in tps for p in t.pts]
+    ys = [p[1] for t in tps for p in t.pts]
+    assert tps and (max(xs) - min(xs)) > 10.0 and (max(ys) - min(ys)) > 10.0  # spans, "+"
+
+
+def test_vector_medial_tiny_dot_is_not_dropped():
+    pytest.importorskip("scipy")
+    import math as _m
+    ring = [(5 + 0.4 * _m.cos(t), 5 + 0.4 * _m.sin(t)) for t in
+            [i / 24 * 2 * _m.pi for i in range(25)]]
+    opts = VCarveOpts(page_w_mm=10, page_h_mm=10, half_angle_deg=45, max_depth_mm=10,
+                      min_depth_mm=0.3, prune_mm=0.4)
+    assert vcarve.build_fill_toolpaths([("dot", [ring])], opts)  # carves (not dropped)
 
 
 def test_run_writes_both_preview_png_and_svg(tmp_path):
