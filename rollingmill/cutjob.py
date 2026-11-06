@@ -43,10 +43,86 @@ Wire model (RE'd from VP_MDX40A — see docs/sending-nc-code.md):
 
 import os
 import time
-from typing import Optional
+from dataclasses import dataclass
+from typing import Optional, Sequence
 
 from . import machine as _machine
 from . import sleep_inhibit
+
+
+# ── NC syntax checks ─────────────────────────────────────────────────────────
+#
+# `check_nc` is a pure function over already-parsed blocks: it does not touch
+# the machine and is exposed for use both by `CutJob.from_bytes` (which
+# rejects files with any warning rather than stream them to firmware that
+# will choke) and by the `python -m rollingmill.check <file>` lint CLI.
+
+# Rule numbers — stable identifiers carried on each NCWarning.
+RULE_PAREN_EMBEDDED = 1
+RULE_PAREN_UNCLOSED = 2
+
+
+@dataclass(frozen=True)
+class NCWarning:
+    """A single problem found in an NC/RML block stream.
+
+    ``rule`` is the integer rule id (see ``RULE_*`` constants). ``line`` is
+    the 1-based block index. ``column`` is the 1-based byte offset within
+    the block where the problem starts, or 0 if not applicable. ``message``
+    is a human-readable description suitable for ``file:line:col: msg``
+    style command-line output.
+    """
+    rule: int
+    line: int
+    column: int
+    message: str
+
+
+def check_nc(blocks: Sequence[bytes]) -> Sequence[NCWarning]:
+    """Return all NC syntax warnings found in *blocks*. Empty if file is OK.
+
+    *blocks* is the raw output of :func:`parse_nc_blocks` — one entry per
+    source line including its trailing delimiter. Decoding from bytes to
+    ASCII text happens inside this function (non-ASCII bytes are mapped
+    to U+FFFD, so character indices remain 1:1 with byte indices and the
+    reported column matches the file's byte offset).
+
+    Current checks:
+      * RULE_PAREN_UNCLOSED — a line that starts with ``(`` must end with
+        ``)``; missing close trips strict NC parsers.
+      * RULE_PAREN_EMBEDDED — a comment line must contain no other ``(``
+        or ``)`` between its outer pair; the firmware treats the first
+        inner ``)`` as end-of-comment and rejects the remainder.
+
+    Lines that contain ``(`` mid-stream (e.g. ``G01 X1.0 ( inline ) F100``)
+    are not classified as comment lines and pass through untouched.
+    """
+    warnings: list[NCWarning] = []
+    for line_no, block in enumerate(blocks, start=1):
+        content = block.decode('ascii', errors='replace').rstrip()
+        if not content.startswith('('):
+            continue
+        if not content.endswith(')'):
+            warnings.append(NCWarning(
+                rule=RULE_PAREN_UNCLOSED,
+                line=line_no,
+                column=1,
+                message="comment opens with '(' but does not close with ')'",
+            ))
+            continue
+        middle = content[1:-1]
+        for j, ch in enumerate(middle):
+            if ch in '()':
+                # +1 to skip the outer '(', +1 to convert 0-based to 1-based.
+                col = j + 2
+                warnings.append(NCWarning(
+                    rule=RULE_PAREN_EMBEDDED,
+                    line=line_no,
+                    column=col,
+                    message="embedded parenthesis in comment",
+                ))
+                break
+    return warnings
 
 
 def parse_nc_blocks(data: bytes) -> list:
@@ -64,6 +140,9 @@ def parse_nc_blocks(data: bytes) -> list:
     The counter at GET 0x0200 advances by exactly len(block), so any
     normalisation (e.g. promoting LF → CRLF) would break the expected-vs-
     actual counter math used by CutJob.service.
+
+    This function only parses — it does not validate. Use ``check_nc()``
+    on the decoded blocks for syntax checks.
     """
     offsets = [0]
     i, n = 0, len(data)
@@ -79,6 +158,40 @@ def parse_nc_blocks(data: bytes) -> list:
     blocks = [data[offsets[k]:offsets[k+1]] for k in range(len(offsets) - 1)]
     if offsets[-1] < n:                              # tail with no trailing delimiter
         blocks.append(data[offsets[-1]:])
+    return blocks
+
+
+class NCLintError(ValueError):
+    """Raised by :func:`load_nc_blocks` when a file has lint warnings.
+
+    Carries the parsed ``blocks`` and the full ``warnings`` list so callers
+    can render rich diagnostics; ``str(exc)`` is a one-line summary of the
+    first warning.
+    """
+    def __init__(self, blocks: Sequence[bytes], warnings: Sequence[NCWarning]):
+        self.blocks = blocks
+        self.warnings = warnings
+        first = warnings[0]
+        extra = f" (+{len(warnings) - 1} more)" if len(warnings) > 1 else ""
+        super().__init__(
+            f"line {first.line}:{first.column} [rule {first.rule}] "
+            f"{first.message}{extra}"
+        )
+
+
+def load_nc_blocks(data: bytes) -> list[bytes]:
+    """Parse *data* into blocks and lint them.
+
+    Raises ``NCLintError`` (a ``ValueError``) if any rule fires, or plain
+    ``ValueError`` if there are no blocks. Needs no machine, so it can run
+    before USB discovery.
+    """
+    blocks = parse_nc_blocks(data)
+    if not blocks:
+        raise ValueError(f"No NC blocks found in payload ({len(data)} bytes)")
+    warnings = check_nc(blocks)
+    if warnings:
+        raise NCLintError(blocks, warnings)
     return blocks
 
 
@@ -107,10 +220,13 @@ class CutJob:
 
     @classmethod
     def from_bytes(cls, machine: _machine.MDX40A, data: bytes, filename: str = '') -> 'CutJob':
-        """Parse *data* into blocks and return a CutJob ready to be started."""
-        blocks = parse_nc_blocks(data)
-        if not blocks:
-            raise ValueError(f"No NC blocks found in payload ({len(data)} bytes)")
+        """Parse *data* into blocks and return a CutJob ready to be started.
+
+        Runs ``check_nc()`` on the parsed blocks and rejects the file with
+        ``ValueError`` if any warnings fire — streaming a syntactically
+        bad file would crash mid-job.
+        """
+        blocks = load_nc_blocks(data)
         return cls(machine, blocks, filename)
 
     @classmethod

@@ -99,6 +99,7 @@ MDX GCode Intepreter Notes
 * Ensure all `XYZ` values have a decimal point, and no more than 3 digits of precision
 * Feed rates need a decimal point too
 * Machine coordinate moves `G53` must be always given in `G90` absolute programming. Specifying G53 in G91 incremental results in an error.
+* No embedded parenthesis within a G-code comment
 
 Check your code using this [online G-code viewer](https://shucksmith.uk/NCviewer/), customised for the MDX G-code varient.
 
