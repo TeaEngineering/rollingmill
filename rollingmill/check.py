@@ -12,11 +12,16 @@ colour is applied when stdout is a TTY and ``NO_COLOR`` is unset.
 """
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 from typing import Optional
 
 from .cutjob import NCLintError, NCWarning, load_nc_blocks
+from .estimate import (
+    DEFAULT_MIN_OP_S, DEFAULT_RAPID_XY, DEFAULT_RAPID_Z,
+    EstimateOptions, estimate_time, format_duration,
+)
 
 
 # Minimal ANSI palette. Empty strings when colour is disabled, so the
@@ -59,12 +64,13 @@ def _format_warning(
     )
 
 
-def lint_file(path: str) -> int:
+def lint_file(path: str, estimate: Optional[EstimateOptions] = None) -> int:
     """Read *path*, run ``load_nc_blocks``, print results in three-line ANSI format.
 
     Returns the same exit-code contract as :func:`main`: 0 clean, 1 warnings,
     2 I/O error. Used both by the standalone CLI and by ``tui.main`` to
-    short-circuit a bad ``--file`` before any USB discovery.
+    short-circuit a bad ``--file`` before any USB discovery. When *estimate*
+    is given and the file is clean, a milling-time estimate is also printed.
     """
     try:
         with open(path, 'rb') as fh:
@@ -91,16 +97,51 @@ def lint_file(path: str) -> int:
         print(f"error: {path}: {exc}", file=sys.stderr)
         return 2
     print(f"{style.green}{path}: OK ({len(blocks)} blocks){style.reset}")
+    if estimate is not None:
+        _print_estimate(blocks, estimate, style)
     return 0
+
+
+def _print_estimate(blocks, opts: EstimateOptions, style: _Style) -> None:
+    est = estimate_time(blocks, opts)
+    print(
+        f"{style.bold}Estimated time: {format_duration(est.total_s)}{style.reset}"
+        f" (cutting {format_duration(est.cutting_s)},"
+        f" rapid {format_duration(est.rapid_s)},"
+        f" dwell {format_duration(est.dwell_s)},"
+        f" commands {format_duration(est.command_s)};"
+        f" {est.moves} moves, {est.path_mm:.0f} mm path)"
+    )
+    for w in est.warnings:
+        print(f"{style.yellow}  estimate: {w}{style.reset}")
 
 
 def main(argv: Optional[list[str]] = None) -> int:
     """CLI entry: ``python -m rollingmill.check <filename>``."""
-    args = sys.argv[1:] if argv is None else argv
-    if len(args) != 1:
-        print("usage: python -m rollingmill.check <filename>", file=sys.stderr)
-        return 2
-    return lint_file(args[0])
+    parser = argparse.ArgumentParser(
+        prog="python -m rollingmill.check",
+        description="Lint an NC file and estimate its milling time.",
+    )
+    parser.add_argument("filename")
+    parser.add_argument("--rapid-xy", type=float, default=DEFAULT_RAPID_XY,
+                        metavar="MM_MIN", help="XY rapid speed (default %(default)s mm/min)")
+    parser.add_argument("--rapid-z", type=float, default=DEFAULT_RAPID_Z,
+                        metavar="MM_MIN", help="Z rapid speed (default %(default)s mm/min)")
+    parser.add_argument("--feed-override", type=float, default=100.0,
+                        metavar="PCT", help="cutting feed override %% (default %(default)s)")
+    parser.add_argument("--min-op", type=float, default=DEFAULT_MIN_OP_S,
+                        metavar="SEC", help="minimum time per move/dwell (default %(default)s s)")
+    parser.add_argument("--no-estimate", action="store_true",
+                        help="lint only, skip the time estimate")
+    try:
+        args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    except SystemExit as exc:
+        return int(exc.code or 0) if isinstance(exc.code, int) else 2
+    opts = None if args.no_estimate else EstimateOptions(
+        rapid_xy=args.rapid_xy, rapid_z=args.rapid_z,
+        feed_override_pct=args.feed_override, min_op_s=args.min_op,
+    )
+    return lint_file(args.filename, opts)
 
 
 if __name__ == "__main__":

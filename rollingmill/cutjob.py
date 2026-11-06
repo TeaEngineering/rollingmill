@@ -42,6 +42,7 @@ Wire model (RE'd from VP_MDX40A — see docs/sending-nc-code.md):
 """
 
 import os
+import re
 import time
 from dataclasses import dataclass
 from typing import Optional, Sequence
@@ -60,6 +61,12 @@ from . import sleep_inhibit
 # Rule numbers — stable identifiers carried on each NCWarning.
 RULE_PAREN_EMBEDDED = 1
 RULE_PAREN_UNCLOSED = 2
+RULE_G_ONE_DIGIT = 3
+RULE_SPINDLE_OFF = 4
+
+_PAREN_SPAN = re.compile(r'\([^)]*\)?')
+# One letter-number word. Words may be packed with no spaces (``F300.0S6000M03``).
+_WORD = re.compile(r'([A-Za-z])\s*([-+]?(?:\d+\.?\d*|\.\d+))')
 
 
 @dataclass(frozen=True)
@@ -93,14 +100,51 @@ def check_nc(blocks: Sequence[bytes]) -> Sequence[NCWarning]:
       * RULE_PAREN_EMBEDDED — a comment line must contain no other ``(``
         or ``)`` between its outer pair; the firmware treats the first
         inner ``)`` as end-of-comment and rejects the remainder.
+      * RULE_G_ONE_DIGIT — G-codes must be written with two digits
+        (``G01``, not ``G1``).
+      * RULE_SPINDLE_OFF — a ``G01``/``G02``/``G03`` cutting move before the
+        spindle has been started with ``M03`` faults the machine. Reported
+        once per spindle-off stretch (start of file, or after ``M05``).
 
     Lines that contain ``(`` mid-stream (e.g. ``G01 X1.0 ( inline ) F100``)
     are not classified as comment lines and pass through untouched.
     """
     warnings: list[NCWarning] = []
+    spindle_on = False
+    spindle_reported = False
     for line_no, block in enumerate(blocks, start=1):
         content = block.decode('ascii', errors='replace').rstrip()
         if not content.startswith('('):
+            # Blank out comments (keeping columns) so the word rules below
+            # only see code.
+            code = _PAREN_SPAN.sub(lambda m: ' ' * len(m.group()), content)
+            code = code.split(';', 1)[0]
+            for m in _WORD.finditer(code):
+                letter, text = m.group(1).upper(), m.group(2)
+                if letter not in 'GM' or '.' in text:
+                    continue
+                num = int(text)
+                if letter == 'G' and len(text) == 1:
+                    warnings.append(NCWarning(
+                        rule=RULE_G_ONE_DIGIT,
+                        line=line_no,
+                        column=m.start() + 1,
+                        message=f"G-code must have two digits: write G0{text}",
+                    ))
+                if letter == 'M' and num in (3, 4):
+                    spindle_on, spindle_reported = True, False
+                elif letter == 'M' and num in (5, 2, 30):
+                    spindle_on = False
+                elif (letter == 'G' and num in (1, 2, 3)
+                      and not spindle_on and not spindle_reported):
+                    spindle_reported = True
+                    warnings.append(NCWarning(
+                        rule=RULE_SPINDLE_OFF,
+                        line=line_no,
+                        column=m.start() + 1,
+                        message="cutting move before spindle on (M03); "
+                                "the machine will fault",
+                    ))
             continue
         if not content.endswith(')'):
             warnings.append(NCWarning(
