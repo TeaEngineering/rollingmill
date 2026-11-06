@@ -94,14 +94,68 @@ Gotchas/Notes using the mill
 
 MDX GCode Intepreter Notes
 ----
+
 * G-codes must be two digits (`G01`, `G00` etc)
 * Dont forget to turn the spindle on (Sxxxx M03) otherwise the machine will fault on the first `G01` operation
 * Ensure all `XYZ` values have a decimal point, and no more than 3 digits of precision
 * Feed rates need a decimal point too
 * Machine coordinate moves `G53` must be always given in `G90` absolute programming. Specifying G53 in G91 incremental results in an error.
+* No embedded parenthesis within a G-code comment
+* Decimal G-codes (e.g. `G38.2`, `G90.1`) are not supported
+* Comments must be on their own line: no inline comments after code, e.g. `G01 X1.0 (note)`
 
-Check your code using this [online G-code viewer](https://shucksmith.uk/NCviewer/), customised for the MDX G-code varient.
+`rollingmill.check` lints an NC file, and prints an estimate of the milling time. `rollingmill --file` refuses to stream a file that fails.
 
+```
+$ python -m rollingmill.check sample-nc/hole47.gcode
+sample-nc/hole47.gcode: OK (140 blocks)
+Estimated time: 2m 57s (cutting 2m 44s, rapid 12s, dwell 0s, commands 0s; 97 moves, 1017 mm path)
+```
+
+The rules are:
+
+| Rule | Checks |
+|------|--------|
+| 1 | no embedded parenthesis within a comment |
+| 2 | a comment that opens with `(` must close with `)` |
+| 3 | G-codes must have two digits (`G01`, not `G1`) |
+| 4 | no `G01`/`G02`/`G03` cutting move before the spindle is started with `M03` |
+| 5 | no inline comments: a `(` comment must be on a line of its own |
+| 6 | no decimal G-codes (`G38.2`, `G90.1`) |
+| 7 | only supported G-codes (e.g. `G64` is rejected) |
+| 8 | only supported M-codes (e.g. `M04` and `M08` are rejected) |
+
+The supported G- and M-code lists for rules 7 and 8 come from section 2-7 "List of Words" (printed pages 63–64) of Roland's NC Code Reference Manual.
+
+If the file breaks a rule, each problem is shown gcc-style with the offending line and a caret, and the exit code is 1 (0 is clean, 2 is an I/O error):
+
+```
+Input file failed validation:
+broken.gcode:1:4: [rule 1] embedded parenthesis in comment
+(a (b)
+   ^
+broken.gcode: 1 warning(s)
+```
+
+The estimate assumes the tool starts at the workspace origin and moves at the programmed feed, with no acceleration model, so files made of many tiny moves will run slower than predicted. Every move or dwell is counted as taking at least 250 ms to cover communications overhead. The rapid speeds are assumptions rather than measured values, so set them for your machine:
+
+| Option | Default | Meaning |
+|--------|---------|---------|
+| `--rapid-xy MM_MIN` | 3000 | XY rapid speed (`G00`) |
+| `--rapid-z MM_MIN` | 3000 | Z rapid speed (`G00`) |
+| `--feed-override PCT` | 100 | cutting feed override, as set on the TUI with <kbd>-</kbd> / <kbd>+</kbd> |
+| `--min-op SEC` | 0.25 | minimum time for any move or dwell |
+| `--no-estimate` | | lint only |
+
+For example, with the feed override at 80% the same file takes longer:
+
+```
+$ python -m rollingmill.check --feed-override 80 sample-nc/hole47.gcode
+sample-nc/hole47.gcode: OK (140 blocks)
+Estimated time: 3m 38s (cutting 3m 25s, rapid 12s, dwell 0s, commands 0s; 97 moves, 1017 mm path)
+```
+
+You can visualise the MDX toolpaths with my [online G-code viewer](https://shucksmith.uk/NCviewer/).
 
 ZCL-40A 4th Axis
 ----

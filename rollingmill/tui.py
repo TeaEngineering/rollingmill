@@ -36,6 +36,7 @@ import curses
 import logging
 import time
 from typing import Optional, Tuple
+import sys
 
 from . import machine as _machine
 from . import trace as _trace
@@ -43,6 +44,7 @@ from .machine import (FLAG_VIEW_LED, FLAG_DOOR, FLAG_SPINDLE, FLAG_CMD_MOVE,
                       FLAG_TOOLBTN, FLAG_NC_READY, FLAG_MOVING, FLAG_BUSY,
                       FLAG_ERROR, FLAG_STATE, FLAG_STATE_SHIFT, JOG_SPEED_MAX,
                       STATE_MAP, WCS_SLOT_NAMES)
+from .check import lint_file
 from .trace import Tracer
 from .cutjob import CutJob
 
@@ -1141,7 +1143,7 @@ class TUI:
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-def main(argv=None) -> None:
+def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description='MDX-40A interactive TUI')
     parser.add_argument('-v', '--verbose', action='count', default=0,
                         help='-v INFO  -vv DEBUG')
@@ -1150,6 +1152,14 @@ def main(argv=None) -> None:
     parser.add_argument('--mock', action='store_true',
                         help='Mock USB layer — run without a physical device')
     args = parser.parse_args(argv)
+
+    # Lint the NC file before bringing up the USB stack: it's pointless to
+    # detect/handshake the mill only to abort once we read the file. Any
+    # warnings are printed to stdout/stderr and we exit early.
+    if args.file:
+        rc = lint_file(args.file)
+        if rc != 0:
+            return rc
 
     level = {0: logging.WARNING, 1: logging.INFO}.get(args.verbose, logging.DEBUG)
 
@@ -1171,7 +1181,6 @@ def main(argv=None) -> None:
 
     raw_link = MdxMockUSB() if args.mock else MdxUSB.discover()
     with _trace.open_trace() as t, t.wrap_link(raw_link) as link:
-        import sys
         t.annotate(f"argv: {' '.join(sys.argv)}")
         m = _machine.MDX40A(link)
         tui = TUI(m, log_buf, t)
@@ -1181,4 +1190,4 @@ def main(argv=None) -> None:
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main() or 0)
