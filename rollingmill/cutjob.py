@@ -63,6 +63,20 @@ RULE_PAREN_EMBEDDED = 1
 RULE_PAREN_UNCLOSED = 2
 RULE_G_ONE_DIGIT = 3
 RULE_SPINDLE_OFF = 4
+RULE_INLINE_COMMENT = 5
+RULE_G_DECIMAL = 6
+RULE_G_UNSUPPORTED = 7
+RULE_M_UNSUPPORTED = 8
+
+# Codes the MDX accepts. Source: Roland DG "NC CODE REFERENCE MANUAL"
+# (manuals/MDX-NC_CODE_EN.pdf), section 2-7 "List of Words", printed pages
+# 63-64 (PDF pages 65-66): "Preparatory Functions (G Functions)" and
+# "Miscellaneous Functions (M Functions)". Note M04 is not in the list.
+SUPPORTED_G = frozenset({
+    0, 1, 2, 3, 4, 10, 17, 18, 19, 20, 21, 28, 39, 40, 41, 42, 43, 49, 50, 51,
+    53, 54, 55, 56, 57, 58, 59, 80, 81, 82, 83, 85, 86, 89, 90, 91, 92, 98, 99,
+})
+SUPPORTED_M = frozenset({0, 1, 2, 3, 5, 6, 12, 13, 14, 15, 16, 17, 30})
 
 _PAREN_SPAN = re.compile(r'\([^)]*\)?')
 # One letter-number word. Words may be packed with no spaces (``F300.0S6000M03``).
@@ -105,6 +119,12 @@ def check_nc(blocks: Sequence[bytes]) -> Sequence[NCWarning]:
       * RULE_SPINDLE_OFF — a ``G01``/``G02``/``G03`` cutting move before the
         spindle has been started with ``M03`` faults the machine. Reported
         once per spindle-off stretch (start of file, or after ``M05``).
+      * RULE_INLINE_COMMENT — comments must be on a line of their own; the
+        MDX rejects a ``(`` that follows code on the same line.
+      * RULE_G_DECIMAL — decimal G-codes (``G38.2``, ``G90.1``) are not in
+        the MDX's supported list.
+      * RULE_G_UNSUPPORTED / RULE_M_UNSUPPORTED — integer G or M codes not in
+        ``SUPPORTED_G`` / ``SUPPORTED_M`` (the manual's list of words).
 
     Lines that contain ``(`` mid-stream (e.g. ``G01 X1.0 ( inline ) F100``)
     are not classified as comment lines and pass through untouched.
@@ -117,13 +137,38 @@ def check_nc(blocks: Sequence[bytes]) -> Sequence[NCWarning]:
         if not content.startswith('('):
             # Blank out comments (keeping columns) so the word rules below
             # only see code.
+            paren = content.find('(')
+            if paren > 0 and content[:paren].strip():
+                warnings.append(NCWarning(
+                    rule=RULE_INLINE_COMMENT,
+                    line=line_no,
+                    column=paren + 1,
+                    message="inline comment; comments must be on their own line",
+                ))
             code = _PAREN_SPAN.sub(lambda m: ' ' * len(m.group()), content)
             code = code.split(';', 1)[0]
             for m in _WORD.finditer(code):
                 letter, text = m.group(1).upper(), m.group(2)
+                if letter == 'G' and '.' in text:
+                    warnings.append(NCWarning(
+                        rule=RULE_G_DECIMAL,
+                        line=line_no,
+                        column=m.start() + 1,
+                        message=f"decimal G-code G{text} is not supported",
+                    ))
+                    continue
                 if letter not in 'GM' or '.' in text:
                     continue
                 num = int(text)
+                if num not in (SUPPORTED_G if letter == 'G' else SUPPORTED_M):
+                    rule = RULE_G_UNSUPPORTED if letter == 'G' else RULE_M_UNSUPPORTED
+                    warnings.append(NCWarning(
+                        rule=rule,
+                        line=line_no,
+                        column=m.start() + 1,
+                        message=f"{letter}{num:02d} is not a supported MDX code",
+                    ))
+                    continue
                 if letter == 'G' and len(text) == 1:
                     warnings.append(NCWarning(
                         rule=RULE_G_ONE_DIGIT,
@@ -131,7 +176,7 @@ def check_nc(blocks: Sequence[bytes]) -> Sequence[NCWarning]:
                         column=m.start() + 1,
                         message=f"G-code must have two digits: write G0{text}",
                     ))
-                if letter == 'M' and num in (3, 4):
+                if letter == 'M' and num == 3:
                     spindle_on, spindle_reported = True, False
                 elif letter == 'M' and num in (5, 2, 30):
                     spindle_on = False

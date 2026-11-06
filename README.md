@@ -101,6 +101,8 @@ MDX GCode Intepreter Notes
 * Feed rates need a decimal point too
 * Machine coordinate moves `G53` must be always given in `G90` absolute programming. Specifying G53 in G91 incremental results in an error.
 * No embedded parenthesis within a G-code comment
+* Decimal G-codes (e.g. `G38.2`, `G90.1`) are not supported
+* Comments must be on their own line: no inline comments after code, e.g. `G01 X1.0 (note)`
 
 `rollingmill.check` lints an NC file, and prints an estimate of the milling time. `rollingmill --file` refuses to stream a file that fails.
 
@@ -118,6 +120,12 @@ The rules are:
 | 2 | a comment that opens with `(` must close with `)` |
 | 3 | G-codes must have two digits (`G01`, not `G1`) |
 | 4 | no `G01`/`G02`/`G03` cutting move before the spindle is started with `M03` |
+| 5 | no inline comments: a `(` comment must be on a line of its own |
+| 6 | no decimal G-codes (`G38.2`, `G90.1`) |
+| 7 | only supported G-codes (e.g. `G64` is rejected) |
+| 8 | only supported M-codes (e.g. `M04` and `M08` are rejected) |
+
+The supported G- and M-code lists for rules 7 and 8 come from section 2-7 "List of Words" (printed pages 63–64) of Roland's NC Code Reference Manual.
 
 If the file breaks a rule, each problem is shown gcc-style with the offending line and a caret, and the exit code is 1 (0 is clean, 2 is an I/O error):
 
