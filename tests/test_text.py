@@ -1,4 +1,5 @@
 """Tests for rollingmill.text — pyhershey-backed g-code emit."""
+
 from __future__ import annotations
 
 import sys
@@ -18,6 +19,7 @@ from rollingmill import text as t2g  # noqa: E402
 
 # ---------- font discovery ----------
 
+
 def test_available_fonts_includes_roman_simplex() -> None:
     fonts = t2g.available_fonts()
     assert "roman_simplex" in fonts
@@ -29,6 +31,7 @@ def test_default_font_is_in_available_list() -> None:
 
 
 # ---------- emit ----------
+
 
 def test_emit_basic_renders_strokes() -> None:
     out = t2g.emit_gcode("I", "roman_simplex", t2g.GCodeOpts(height_mm=9.0))
@@ -88,8 +91,7 @@ def test_emit_no_workspace_by_default() -> None:
 
 
 def test_emit_return_home_appended() -> None:
-    out = t2g.emit_gcode("I", "roman_simplex",
-                         t2g.GCodeOpts(height_mm=9.0, return_home=True))
+    out = t2g.emit_gcode("I", "roman_simplex", t2g.GCodeOpts(height_mm=9.0, return_home=True))
     lines = out.splitlines()
     assert "G00 X0.0 Y0.0" in lines
     assert lines.index("G00 X0.0 Y0.0") > lines.index("M03")
@@ -101,6 +103,7 @@ def test_emit_uses_per_glyph_advance_width() -> None:
     a fixed global LetterSpacing. Verify by checking that the start of the
     second glyph's first stroke is at the expected cursor position."""
     from pyhershey import glyph_factory as gf
+
     g_P = gf.from_ascii("P", "roman_simplex")
     g_a = gf.from_ascii("a", "roman_simplex")
     cap = t2g._cap_height("roman_simplex")
@@ -124,10 +127,12 @@ def test_emit_uses_per_glyph_advance_width() -> None:
 
 def test_letter_spacing_adds_gap() -> None:
     """`letter_spacing_mm` should add a fixed mm gap after each glyph."""
-    out_tight = t2g.emit_gcode("II", "roman_simplex",
-                               t2g.GCodeOpts(height_mm=10.0, letter_spacing_mm=0.0))
-    out_loose = t2g.emit_gcode("II", "roman_simplex",
-                               t2g.GCodeOpts(height_mm=10.0, letter_spacing_mm=5.0))
+    out_tight = t2g.emit_gcode(
+        "II", "roman_simplex", t2g.GCodeOpts(height_mm=10.0, letter_spacing_mm=0.0)
+    )
+    out_loose = t2g.emit_gcode(
+        "II", "roman_simplex", t2g.GCodeOpts(height_mm=10.0, letter_spacing_mm=5.0)
+    )
 
     def max_x(s: str) -> float:
         xs = []

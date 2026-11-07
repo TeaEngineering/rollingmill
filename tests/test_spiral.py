@@ -1,4 +1,5 @@
 """Tests for rollingmill/spiral.py -- neat-spiral (hypotrochoid) g-code emit."""
+
 from __future__ import annotations
 
 import math
@@ -10,6 +11,7 @@ from rollingmill import spiral
 
 
 # ---------- helpers ----------
+
 
 def _xs(s: str) -> list[float]:
     xs: list[float] = []
@@ -37,6 +39,7 @@ def _ys(s: str) -> list[float]:
 
 # ---------- header / footer order ----------
 
+
 def test_emit_header_and_footer_order() -> None:
     out = spiral.emit_gcode(96, 52, 30.0, spiral.SpiralOpts(radius_mm=40.0, spindle_rpm=8000))
     lines = out.splitlines()
@@ -53,9 +56,7 @@ def test_emit_header_and_footer_order() -> None:
 
 
 def test_emit_workspace_in_header() -> None:
-    out = spiral.emit_gcode(
-        96, 52, 30.0, spiral.SpiralOpts(radius_mm=40.0, workspace="G54")
-    )
+    out = spiral.emit_gcode(96, 52, 30.0, spiral.SpiralOpts(radius_mm=40.0, workspace="G54"))
     lines = out.splitlines()
     assert "G54" in lines
     assert lines.index("G54") < lines.index("G00 Z2.0")
@@ -68,9 +69,7 @@ def test_emit_no_workspace_by_default() -> None:
 
 
 def test_emit_return_home_appended() -> None:
-    out = spiral.emit_gcode(
-        96, 52, 30.0, spiral.SpiralOpts(radius_mm=40.0, return_home=True)
-    )
+    out = spiral.emit_gcode(96, 52, 30.0, spiral.SpiralOpts(radius_mm=40.0, return_home=True))
     lines = out.splitlines()
     assert "G00 X0.0 Y0.0" in lines
     assert lines.index("G00 X0.0 Y0.0") > lines.index("M03")
@@ -78,6 +77,7 @@ def test_emit_return_home_appended() -> None:
 
 
 # ---------- single pen cycle ----------
+
 
 def test_single_pen_down_up_cycle() -> None:
     out = spiral.emit_gcode(96, 52, 30.0, spiral.SpiralOpts(radius_mm=40.0))
@@ -133,8 +133,7 @@ def test_arc_ij_are_incremental() -> None:
             r_start = math.hypot(cur_x - cx, cur_y - cy)
             r_end = math.hypot(ex - cx, ey - cy)
             assert abs(r_start - r_end) < 0.01, (
-                f"arc centre inconsistent: r_start={r_start}, r_end={r_end}, "
-                f"line={line!r}"
+                f"arc centre inconsistent: r_start={r_start}, r_end={r_end}, line={line!r}"
             )
             cur_x, cur_y = ex, ey
             checked += 1
@@ -143,12 +142,11 @@ def test_arc_ij_are_incremental() -> None:
 
 # ---------- geometry: centre + scale ----------
 
+
 def test_pattern_centred_and_bounded() -> None:
     radius = 10.0
     cx, cy = 50.0, 25.0
-    out = spiral.emit_gcode(
-        96, 52, 30.0, spiral.SpiralOpts(radius_mm=radius, x0=cx, y0=cy)
-    )
+    out = spiral.emit_gcode(96, 52, 30.0, spiral.SpiralOpts(radius_mm=radius, x0=cx, y0=cy))
     xs = _xs(out)
     ys = _ys(out)
     # Skip the trailing return-home zeros (not enabled here, but be defensive).
@@ -158,22 +156,17 @@ def test_pattern_centred_and_bounded() -> None:
     assert all(cx - radius - eps <= x <= cx + radius + eps for x in drawing_xs)
     assert all(cy - radius - eps <= y <= cy + radius + eps for y in drawing_ys)
     # And the pattern actually reaches close to the radius envelope.
-    rmax = max(
-        math.hypot(x - cx, y - cy)
-        for x, y in zip(drawing_xs, drawing_ys)
-    )
+    rmax = max(math.hypot(x - cx, y - cy) for x, y in zip(drawing_xs, drawing_ys))
     assert abs(rmax - radius) < 0.5  # within sampling tolerance
 
 
 # ---------- closure ----------
 
+
 def test_curve_closes_to_start() -> None:
     out = spiral.emit_gcode(96, 52, 30.0, spiral.SpiralOpts(radius_mm=40.0))
     rapids = [l for l in out.splitlines() if l.startswith("G00 X")]
-    drawn = [
-        l for l in out.splitlines()
-        if l.startswith(("G01 X", "G02 ", "G03 "))
-    ]
+    drawn = [l for l in out.splitlines() if l.startswith(("G01 X", "G02 ", "G03 "))]
     # First XY is the rapid to start; last drawn move closes the curve.
     first = rapids[0]
     last = drawn[-1]
@@ -195,6 +188,7 @@ def test_curve_closes_to_start() -> None:
 
 # ---------- geometry sanity: hypocycloid limit ----------
 
+
 def test_hypocycloid_max_extent_equals_radius() -> None:
     """When d == r the curve is a hypocycloid whose cusps touch a circle of
     radius (R - r) + d = R - r + r = R (in tooth units). After scaling, max
@@ -208,12 +202,23 @@ def test_hypocycloid_max_extent_equals_radius() -> None:
 
 # ---------- CLI ----------
 
+
 def test_cli_smoke(tmp_path: Path) -> None:
     out_path = tmp_path / "s.gcode"
-    rc = spiral.main([
-        "--ring", "96", "--rotor", "52", "--pen", "30",
-        "--radius", "40", "--out", str(out_path),
-    ])
+    rc = spiral.main(
+        [
+            "--ring",
+            "96",
+            "--rotor",
+            "52",
+            "--pen",
+            "30",
+            "--radius",
+            "40",
+            "--out",
+            str(out_path),
+        ]
+    )
     assert rc == 0
     text = out_path.read_text()
     assert "M30" in text
@@ -222,12 +227,26 @@ def test_cli_smoke(tmp_path: Path) -> None:
 
 def test_cli_workspace_and_centre(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     out_path = tmp_path / "s.gcode"
-    rc = spiral.main([
-        "--ring", "96", "--rotor", "52", "--pen", "30",
-        "--radius", "15", "--x0", "100", "--y0", "100",
-        "--workspace", "G54",
-        "--out", str(out_path),
-    ])
+    rc = spiral.main(
+        [
+            "--ring",
+            "96",
+            "--rotor",
+            "52",
+            "--pen",
+            "30",
+            "--radius",
+            "15",
+            "--x0",
+            "100",
+            "--y0",
+            "100",
+            "--workspace",
+            "G54",
+            "--out",
+            str(out_path),
+        ]
+    )
     assert rc == 0
     text = out_path.read_text()
     assert "G54" in text.splitlines()
@@ -236,6 +255,7 @@ def test_cli_workspace_and_centre(tmp_path: Path, capsys: pytest.CaptureFixture[
 
 
 # ---------- validation ----------
+
 
 def test_emit_rejects_rotor_ge_ring() -> None:
     with pytest.raises(ValueError):
@@ -251,8 +271,18 @@ def test_emit_rejects_non_positive_radius() -> None:
 
 def test_cli_rejects_rotor_ge_ring(tmp_path: Path) -> None:
     with pytest.raises(SystemExit) as ei:
-        spiral.main([
-            "--ring", "30", "--rotor", "30", "--pen", "10",
-            "--radius", "20", "--out", str(tmp_path / "x.gcode"),
-        ])
+        spiral.main(
+            [
+                "--ring",
+                "30",
+                "--rotor",
+                "30",
+                "--pen",
+                "10",
+                "--radius",
+                "20",
+                "--out",
+                str(tmp_path / "x.gcode"),
+            ]
+        )
     assert ei.value.code != 0

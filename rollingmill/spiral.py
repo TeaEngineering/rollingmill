@@ -19,6 +19,7 @@ the maximum radial extent equals the user's requested radius in mm, then emit
 a single pen-down / pen-up cycle centred on (x0, y0), suitable for streaming
 to the MDX-40A via `rollingmill --file <out.gcode>`.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -72,8 +73,10 @@ def _hypo_point(R: int, r: int, d: float, t: float) -> tuple[float, float]:
     """Hypotrochoid position at parameter t, in tooth-count units."""
     Rmr = R - r
     ratio = Rmr / r
-    return (Rmr * math.cos(t) + d * math.cos(ratio * t),
-            Rmr * math.sin(t) - d * math.sin(ratio * t))
+    return (
+        Rmr * math.cos(t) + d * math.cos(ratio * t),
+        Rmr * math.sin(t) - d * math.sin(ratio * t),
+    )
 
 
 def _hypo_tangent_unit(R: int, r: int, d: float, t: float) -> tuple[float, float]:
@@ -125,9 +128,14 @@ def _fit_tangent_arc(
 
 
 def _arc_max_deviation(
-    R: int, r: int, d: float, scale: float,
-    t_start: float, t_end: float,
-    centre: tuple[float, float], radius: float,
+    R: int,
+    r: int,
+    d: float,
+    scale: float,
+    t_start: float,
+    t_end: float,
+    centre: tuple[float, float],
+    radius: float,
     n_check: int = 5,
 ) -> float:
     """Max ||P(t) - centre| - radius| over t in (t_start, t_end), in mm."""
@@ -305,8 +313,7 @@ def emit_gcode(R: int, r: int, d: float, opts: SpiralOpts) -> str:
         if seg[0] == "arc":
             _, ex, ey, i_rel, j_rel, cw = seg
             op = "G02" if cw else "G03"
-            w(f"{op} X{_fmtp(opts.x0 + ex)} Y{_fmtp(opts.y0 + ey)} "
-              f"I{_fmtp(i_rel)} J{_fmtp(j_rel)}")
+            w(f"{op} X{_fmtp(opts.x0 + ex)} Y{_fmtp(opts.y0 + ey)} I{_fmtp(i_rel)} J{_fmtp(j_rel)}")
         else:  # ("line", ex, ey)
             _, ex, ey = seg
             w(f"G01 X{_fmtp(opts.x0 + ex)} Y{_fmtp(opts.y0 + ey)}")
@@ -321,42 +328,59 @@ def emit_gcode(R: int, r: int, d: float, opts: SpiralOpts) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("--ring", type=int, required=True,
-                   help="Ring (outer fixed gear) tooth count R")
-    p.add_argument("--rotor", type=int, required=True,
-                   help="Rotor (inner rolling gear) tooth count r")
-    p.add_argument("--pen", type=float, required=True,
-                   help="Pen arm length d, in the same tooth units as --rotor")
-    p.add_argument("--radius", type=float, required=True,
-                   help="Desired max radial extent of the pattern in mm")
-    p.add_argument("--out", type=Path, required=True,
-                   help="Output .gcode file path")
-    p.add_argument("--x0", type=float, default=0.0,
-                   help="Centre X in mm (default 0.0)")
-    p.add_argument("--y0", type=float, default=0.0,
-                   help="Centre Y in mm (default 0.0)")
-    p.add_argument("--chord-tol", type=float, default=0.05,
-                   help="Chord tolerance for sampling, mm (default 0.05)")
-    p.add_argument("--feed", type=float, default=None,
-                   help="Cutting feed mm/min (default 200, or from --tool)")
-    p.add_argument("--plunge-feed", type=float, default=None,
-                   help="Z plunge feed mm/min (default 50, or from --tool)")
-    p.add_argument("--z-safe", type=float, default=2.0,
-                   help="Pen-up Z height mm (default 2.0)")
-    p.add_argument("--z-cut", type=float, default=-0.1,
-                   help="Pen-down Z depth mm (default -0.1)")
-    p.add_argument("--return-home", action="store_true",
-                   help="Append G00 X0 Y0 at end of program")
-    p.add_argument("--workspace", default=None,
-                   choices=["G54", "G55", "G56", "G57", "G58", "G59"],
-                   help="Workspace offset to select in header (e.g. G54)")
-    p.add_argument("--spindle-rpm", type=int, default=None,
-                   help="Spindle speed in RPM, emitted with M03 "
-                        "(default 10000, or from --tool)")
-    p.add_argument("--tool", default=None,
-                   help="Tool id or name from ~/.rollingmill/tools.json; "
-                        "supplies defaults for --feed, --plunge-feed and "
-                        "--spindle-rpm if those are not set")
+    p.add_argument("--ring", type=int, required=True, help="Ring (outer fixed gear) tooth count R")
+    p.add_argument(
+        "--rotor", type=int, required=True, help="Rotor (inner rolling gear) tooth count r"
+    )
+    p.add_argument(
+        "--pen",
+        type=float,
+        required=True,
+        help="Pen arm length d, in the same tooth units as --rotor",
+    )
+    p.add_argument(
+        "--radius", type=float, required=True, help="Desired max radial extent of the pattern in mm"
+    )
+    p.add_argument("--out", type=Path, required=True, help="Output .gcode file path")
+    p.add_argument("--x0", type=float, default=0.0, help="Centre X in mm (default 0.0)")
+    p.add_argument("--y0", type=float, default=0.0, help="Centre Y in mm (default 0.0)")
+    p.add_argument(
+        "--chord-tol",
+        type=float,
+        default=0.05,
+        help="Chord tolerance for sampling, mm (default 0.05)",
+    )
+    p.add_argument(
+        "--feed", type=float, default=None, help="Cutting feed mm/min (default 200, or from --tool)"
+    )
+    p.add_argument(
+        "--plunge-feed",
+        type=float,
+        default=None,
+        help="Z plunge feed mm/min (default 50, or from --tool)",
+    )
+    p.add_argument("--z-safe", type=float, default=2.0, help="Pen-up Z height mm (default 2.0)")
+    p.add_argument("--z-cut", type=float, default=-0.1, help="Pen-down Z depth mm (default -0.1)")
+    p.add_argument("--return-home", action="store_true", help="Append G00 X0 Y0 at end of program")
+    p.add_argument(
+        "--workspace",
+        default=None,
+        choices=["G54", "G55", "G56", "G57", "G58", "G59"],
+        help="Workspace offset to select in header (e.g. G54)",
+    )
+    p.add_argument(
+        "--spindle-rpm",
+        type=int,
+        default=None,
+        help="Spindle speed in RPM, emitted with M03 (default 10000, or from --tool)",
+    )
+    p.add_argument(
+        "--tool",
+        default=None,
+        help="Tool id or name from ~/.rollingmill/tools.json; "
+        "supplies defaults for --feed, --plunge-feed and "
+        "--spindle-rpm if those are not set",
+    )
     args = p.parse_args(argv)
 
     if args.ring <= args.rotor:
@@ -377,11 +401,13 @@ def main(argv: list[str] | None = None) -> int:
 
     opts = SpiralOpts(
         radius_mm=args.radius,
-        x0=args.x0, y0=args.y0,
+        x0=args.x0,
+        y0=args.y0,
         chord_tol_mm=args.chord_tol,
         feed=_resolve(args.feed, tool, "feed_mm_min", 200.0),
         plunge_feed=_resolve(args.plunge_feed, tool, "plunge_feed_mm_min", 50.0),
-        z_safe=args.z_safe, z_cut=args.z_cut,
+        z_safe=args.z_safe,
+        z_cut=args.z_cut,
         return_home=args.return_home,
         workspace=args.workspace,
         spindle_rpm=_resolve(args.spindle_rpm, tool, "spindle_rpm", 10000),

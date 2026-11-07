@@ -9,6 +9,7 @@ The library is intentionally dependency-free — ``numpy`` is only imported
 lazily by :meth:`Tool.footprint`, which path planners use to build a
 morphological structuring element.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -24,7 +25,11 @@ from typing import Any, Iterable, Literal
 ToolType = Literal["end_mill", "ball_nose", "v_bit", "engraver", "bull_nose"]
 
 VALID_TYPES: tuple[ToolType, ...] = (
-    "end_mill", "ball_nose", "v_bit", "engraver", "bull_nose",
+    "end_mill",
+    "ball_nose",
+    "v_bit",
+    "engraver",
+    "bull_nose",
 )
 
 
@@ -48,9 +53,7 @@ class Tool:
 
     def __post_init__(self) -> None:
         if self.type not in VALID_TYPES:
-            raise ValueError(
-                f"tool {self.id!r}: type {self.type!r} must be one of {VALID_TYPES}"
-            )
+            raise ValueError(f"tool {self.id!r}: type {self.type!r} must be one of {VALID_TYPES}")
         if self.diameter_mm <= 0:
             raise ValueError(f"tool {self.id!r}: diameter_mm must be > 0")
         if self.length_mm <= 0:
@@ -68,25 +71,15 @@ class Tool:
         if self.spindle_rpm <= 0:
             raise ValueError(f"tool {self.id!r}: spindle_rpm must be > 0")
         if self.type == "v_bit" and self.half_angle_deg is None:
-            raise ValueError(
-                f"tool {self.id!r}: v_bit requires half_angle_deg"
-            )
+            raise ValueError(f"tool {self.id!r}: v_bit requires half_angle_deg")
         if self.type == "bull_nose" and self.corner_radius_mm is None:
-            raise ValueError(
-                f"tool {self.id!r}: bull_nose requires corner_radius_mm"
-            )
+            raise ValueError(f"tool {self.id!r}: bull_nose requires corner_radius_mm")
         if self.half_angle_deg is not None and not (0 < self.half_angle_deg < 90):
-            raise ValueError(
-                f"tool {self.id!r}: half_angle_deg must be in (0, 90)"
-            )
+            raise ValueError(f"tool {self.id!r}: half_angle_deg must be in (0, 90)")
         if self.corner_radius_mm is not None and self.corner_radius_mm <= 0:
-            raise ValueError(
-                f"tool {self.id!r}: corner_radius_mm must be > 0"
-            )
+            raise ValueError(f"tool {self.id!r}: corner_radius_mm must be > 0")
         if self.firmware_slot is not None and not (1 <= self.firmware_slot <= 8):
-            raise ValueError(
-                f"tool {self.id!r}: firmware_slot must be in 1..8"
-            )
+            raise ValueError(f"tool {self.id!r}: firmware_slot must be in 1..8")
 
     def to_dict(self) -> dict[str, Any]:
         d = dataclasses.asdict(self)
@@ -154,25 +147,49 @@ def default_path() -> Path:
 
 SEED_TOOLS: list[Tool] = [
     Tool(
-        id="end_6mm", name="6mm 2-flute end mill", type="end_mill",
-        diameter_mm=6.0, length_mm=50.0, flute_length_mm=22.0,
-        shank_diameter_mm=6.0, flutes=2, firmware_slot=1,
-        feed_mm_min=600.0, plunge_feed_mm_min=150.0, spindle_rpm=12000,
+        id="end_6mm",
+        name="6mm 2-flute end mill",
+        type="end_mill",
+        diameter_mm=6.0,
+        length_mm=50.0,
+        flute_length_mm=22.0,
+        shank_diameter_mm=6.0,
+        flutes=2,
+        firmware_slot=1,
+        feed_mm_min=600.0,
+        plunge_feed_mm_min=150.0,
+        spindle_rpm=12000,
         max_doc_mm=3.0,
     ),
     Tool(
-        id="ball_3mm", name="3mm 2-flute ball nose", type="ball_nose",
-        diameter_mm=3.0, length_mm=38.0, flute_length_mm=12.0,
-        shank_diameter_mm=3.175, flutes=2, firmware_slot=2,
-        feed_mm_min=400.0, plunge_feed_mm_min=80.0, spindle_rpm=14000,
+        id="ball_3mm",
+        name="3mm 2-flute ball nose",
+        type="ball_nose",
+        diameter_mm=3.0,
+        length_mm=38.0,
+        flute_length_mm=12.0,
+        shank_diameter_mm=3.175,
+        flutes=2,
+        firmware_slot=2,
+        feed_mm_min=400.0,
+        plunge_feed_mm_min=80.0,
+        spindle_rpm=14000,
         max_doc_mm=1.0,
     ),
     Tool(
-        id="vbit_60", name="60° V-bit", type="v_bit",
-        diameter_mm=6.35, length_mm=38.0, flute_length_mm=10.0,
-        shank_diameter_mm=6.35, flutes=2, half_angle_deg=30.0,
+        id="vbit_60",
+        name="60° V-bit",
+        type="v_bit",
+        diameter_mm=6.35,
+        length_mm=38.0,
+        flute_length_mm=10.0,
+        shank_diameter_mm=6.35,
+        flutes=2,
+        half_angle_deg=30.0,
         firmware_slot=3,
-        feed_mm_min=500.0, plunge_feed_mm_min=80.0, spindle_rpm=14000,
+        feed_mm_min=500.0,
+        plunge_feed_mm_min=80.0,
+        spindle_rpm=14000,
         max_doc_mm=1.0,
     ),
 ]
@@ -252,8 +269,7 @@ def _print_table(tools: list[Tool]) -> None:
     for t in tools:
         slot = "-" if t.firmware_slot is None else str(t.firmware_slot)
         print(
-            f"{t.id:<14} {t.type:<10} {t.diameter_mm:>6.2f} "
-            f"{t.length_mm:>6.1f} {slot:>4}  {t.name}"
+            f"{t.id:<14} {t.type:<10} {t.diameter_mm:>6.2f} {t.length_mm:>6.1f} {slot:>4}  {t.name}"
         )
 
 
@@ -264,8 +280,12 @@ def _print_detail(t: Tool) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("--path", type=Path, default=None,
-                   help="Override library path (default: ~/.rollingmill/tools.json)")
+    p.add_argument(
+        "--path",
+        type=Path,
+        default=None,
+        help="Override library path (default: ~/.rollingmill/tools.json)",
+    )
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("init", help="Create the tools file with seed tools")
