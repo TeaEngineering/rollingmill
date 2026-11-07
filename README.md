@@ -36,6 +36,7 @@ Getting started
 This library is available from PyPi as `rollingmill`.
 
     $ pip install rollingmill
+    $ pip install "rollingmill[maze]"                        # adds maze generator (needs cairo headers on Linux)
     $ rollingmill                                            # launch TUI on real hardware
     $ rollingmill --file sample-nc/example-doc-part.gcode    # stream an NC file
 
