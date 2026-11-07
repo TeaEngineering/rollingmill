@@ -46,6 +46,18 @@ dev = [
 maze = [
     "erbsland-maze>=1.4.8",   # imports pycairo, which builds against system cairo on Linux
 ]
+relief = [
+    "numpy>=1.24",
+    "pillow>=10.0",
+    "scipy>=1.10",
+]
+vcarve = [
+    "numpy>=1.24",
+    "pillow>=10.0",
+    "scipy>=1.10",
+    "scikit-image>=0.22",
+    "svgelements>=1.9",
+]
 
 [project.scripts]
 rollingmill = "rollingmill.tui:main"

@@ -9,6 +9,7 @@ naturally kerned spacing rather than a fixed-width gap between letters.
 Glyphs are emitted as pen-up / pen-down polyline runs intended to be streamed
 to the MDX-40A via the existing `rollingmill --file <out.gcode>` TUI flow.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -17,6 +18,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from pyhershey import glyph_factory
+
+from rollingmill import tools as _tools
+from rollingmill.tools import resolve as _resolve
 
 
 DEFAULT_FONT = "roman_simplex"
@@ -38,7 +42,7 @@ class GCodeOpts:
     z_cut: float = -0.1
     return_home: bool = False
     workspace: str | None = None  # e.g. "G54".."G59"; emitted in header if set
-    spindle_rpm: int = 10000      # S word value, emitted with M03
+    spindle_rpm: int = 10000  # S word value, emitted with M03
     letter_spacing_mm: float = 0.0  # additive gap after each glyph's advance
 
 
@@ -145,36 +149,56 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--text", help="String to render (omit with --list-fonts)")
     p.add_argument("--out", type=Path, help="Output .gcode file path")
-    p.add_argument("--font", default=DEFAULT_FONT, choices=fonts,
-                   metavar="NAME",
-                   help=f"Hershey font name (default: {DEFAULT_FONT}). "
-                        f"Use --list-fonts to see all {len(fonts)} options.")
-    p.add_argument("--list-fonts", action="store_true",
-                   help="Print available font names and exit")
-    p.add_argument("--height", type=float, default=10.0,
-                   help="Cap height in mm (default 10.0)")
-    p.add_argument("--x0", type=float, default=0.0,
-                   help="Start X in mm (default 0.0)")
-    p.add_argument("--y0", type=float, default=0.0,
-                   help="Start Y in mm (default 0.0)")
-    p.add_argument("--feed", type=float, default=200.0,
-                   help="Cutting feed mm/min (default 200)")
-    p.add_argument("--plunge-feed", type=float, default=50.0,
-                   help="Z plunge feed mm/min (default 50)")
-    p.add_argument("--z-safe", type=float, default=2.0,
-                   help="Pen-up Z height mm (default 2.0)")
-    p.add_argument("--z-cut", type=float, default=-0.1,
-                   help="Pen-down Z depth mm (default -0.1)")
-    p.add_argument("--return-home", action="store_true",
-                   help="Append G0 X0 Y0 at end of program")
-    p.add_argument("--workspace", default=None,
-                   choices=["G54", "G55", "G56", "G57", "G58", "G59"],
-                   help="Workspace offset to select in header (e.g. G54)")
-    p.add_argument("--spindle-rpm", type=int, default=10000,
-                   help="Spindle speed in RPM, emitted with M03 (default 10000)")
-    p.add_argument("--letter-spacing", type=float, default=0.0,
-                   help="Extra mm of gap after each glyph's natural advance "
-                        "(default 0.0). Negative values tighten spacing.")
+    p.add_argument(
+        "--font",
+        default=DEFAULT_FONT,
+        choices=fonts,
+        metavar="NAME",
+        help=f"Hershey font name (default: {DEFAULT_FONT}). "
+        f"Use --list-fonts to see all {len(fonts)} options.",
+    )
+    p.add_argument("--list-fonts", action="store_true", help="Print available font names and exit")
+    p.add_argument("--height", type=float, default=10.0, help="Cap height in mm (default 10.0)")
+    p.add_argument("--x0", type=float, default=0.0, help="Start X in mm (default 0.0)")
+    p.add_argument("--y0", type=float, default=0.0, help="Start Y in mm (default 0.0)")
+    p.add_argument(
+        "--feed", type=float, default=None, help="Cutting feed mm/min (default 200, or from --tool)"
+    )
+    p.add_argument(
+        "--plunge-feed",
+        type=float,
+        default=None,
+        help="Z plunge feed mm/min (default 50, or from --tool)",
+    )
+    p.add_argument("--z-safe", type=float, default=2.0, help="Pen-up Z height mm (default 2.0)")
+    p.add_argument("--z-cut", type=float, default=-0.1, help="Pen-down Z depth mm (default -0.1)")
+    p.add_argument("--return-home", action="store_true", help="Append G0 X0 Y0 at end of program")
+    p.add_argument(
+        "--workspace",
+        default=None,
+        choices=["G54", "G55", "G56", "G57", "G58", "G59"],
+        help="Workspace offset to select in header (e.g. G54)",
+    )
+    p.add_argument(
+        "--spindle-rpm",
+        type=int,
+        default=None,
+        help="Spindle speed in RPM, emitted with M03 (default 10000, or from --tool)",
+    )
+    p.add_argument(
+        "--tool",
+        default=None,
+        help="Tool id or name from ~/.rollingmill/tools.json; "
+        "supplies defaults for --feed, --plunge-feed and "
+        "--spindle-rpm if those are not set",
+    )
+    p.add_argument(
+        "--letter-spacing",
+        type=float,
+        default=0.0,
+        help="Extra mm of gap after each glyph's natural advance "
+        "(default 0.0). Negative values tighten spacing.",
+    )
     args = p.parse_args(argv)
 
     if args.list_fonts:
@@ -185,14 +209,24 @@ def main(argv: list[str] | None = None) -> int:
     if not args.text or not args.out:
         p.error("--text and --out are required (unless --list-fonts is given)")
 
+    tool = None
+    if args.tool is not None:
+        try:
+            tool = _tools.find(_tools.load(), args.tool)
+        except (KeyError, ValueError) as e:
+            p.error(str(e))
+
     opts = GCodeOpts(
         height_mm=args.height,
-        x0=args.x0, y0=args.y0,
-        feed=args.feed, plunge_feed=args.plunge_feed,
-        z_safe=args.z_safe, z_cut=args.z_cut,
+        x0=args.x0,
+        y0=args.y0,
+        feed=_resolve(args.feed, tool, "feed_mm_min", 200.0),
+        plunge_feed=_resolve(args.plunge_feed, tool, "plunge_feed_mm_min", 50.0),
+        z_safe=args.z_safe,
+        z_cut=args.z_cut,
         return_home=args.return_home,
         workspace=args.workspace,
-        spindle_rpm=args.spindle_rpm,
+        spindle_rpm=_resolve(args.spindle_rpm, tool, "spindle_rpm", 10000),
         letter_spacing_mm=args.letter_spacing,
     )
     gcode = emit_gcode(args.text, args.font, opts)
