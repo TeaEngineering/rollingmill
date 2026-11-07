@@ -159,7 +159,7 @@ def counting_inhibitor(monkeypatch):
     return counts
 
 
-def _new_job(payload: bytes = b'G0X0\rG0Y0\rG0Z0\r') -> CutJob:
+def _new_job(payload: bytes = b'G00 X0.0\rG00 Y0.0\rG00 Z0.0\r') -> CutJob:
     return CutJob.from_bytes(MDX40A(_AckingMockUSB()), payload, 'test.nc')
 
 
