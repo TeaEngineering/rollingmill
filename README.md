@@ -35,8 +35,10 @@ Getting started
 
 This library is available from PyPi as `rollingmill`.
 
-    $ pip install rollingmill
+    $ pip install rollingmill                                # core: TUI + RML/G-code stream
     $ pip install "rollingmill[maze]"                        # adds maze generator (needs cairo headers on Linux)
+    $ pip install "rollingmill[relief]"                      # adds image-carving deps (numpy/pillow/scipy)
+    $ pip install "rollingmill[vcarve]"                      # adds SVG V-carving deps (numpy/scipy/scikit-image/svgelements)
     $ rollingmill                                            # launch TUI on real hardware
     $ rollingmill --file sample-nc/example-doc-part.gcode    # stream an NC file
 
@@ -175,7 +177,7 @@ These limits are enforced in firmware, including from the physical jog controls 
 Tool library
 -----
 
-The path emitters (`relief3D`, `totem`, `maze`, `spiral`, `text`) share a host-side cutting-tool library at `~/.rollingmill/tools.json`. Each entry carries geometry (type, diameter, length, V-bit half-angle, etc.) plus suggested feeds and spindle speed, and may reference one of the 8 firmware diameter-offset slots.
+The path emitters (`relief3D`, `totem`, `maze`, `spiral`, `text`, `cuthole`, `pocket`) share a host-side cutting-tool library at `~/.rollingmill/tools.json`. Each entry carries geometry (type, diameter, length, V-bit half-angle, etc.) plus suggested feeds and spindle speed, and may reference one of the 8 firmware diameter-offset slots.
 
 ```
 $ python -m rollingmill.tools init     # seed with a 6mm end mill, 3mm ball nose, 60° V-bit
@@ -250,10 +252,25 @@ python -m rollingmill.cuthole \
 
 With `--helix` the tool descends continuously along the arcs (one `--z-step` of pitch per revolution) instead of stepping in flat passes, finishing with one flat pass at full depth. 
 
+Roughing a pocket
+-----
+
+`rollingmill.pocket` roughs/flattens a rectangular area down to a given depth, stepping down `--z-step` mm per level. Each level is entered by a helical ramp round the centre (no straight plunge), then spirals outwards in G02/G03 arcs (rounded-rectangle turns spaced `--stepover` × tool diameter apart), then squares the corners with a perimeter pass. The cutter stays inside the rectangle, so `--width` × `--height` is the finished pocket size.
+
+```
+python -m rollingmill.pocket \
+    --width 60 --height 40 --depth 2 \
+    --out /tmp/pocket.gcode \
+    --tool-dia 3 --stepover 0.45 --z-step 0.5 \
+    --workspace G54
+```
+
+The workspace origin (X0 Y0 Z0 = top of stock) is the pocket's lower-left corner; pass `--center-origin` if it is the centre instead. Climb milling by default; `--conventional` reverses the spiral.
+
 Drawing mazes
 -----
 
-`rollingmill.maze` carves a random rectangular maze using the [`erbsland-maze`](https://pypi.org/project/erbsland-maze/) library, extracts the wall *centerlines* (one stroke per wall, not the outline of a thick wall), and emits a single-pass pen-down/pen-up G-code program. Start- and end-of-path rooms are flagged with small marker squares.
+`rollingmill.maze` carves a random rectangular maze using the [`erbsland-maze`](https://pypi.org/project/erbsland-maze/) library, extracts the wall *centerlines* (one stroke per wall, not the outline of a thick wall), and emits a G-code program to scribe the walls. Start- and end-of-path rooms are flagged with small marker squares.
 
 ```
 python -m rollingmill.maze \
@@ -271,6 +288,35 @@ python -m rollingmill.maze \
 Then load on the machine: `rollingmill --file /tmp/maze.gcode`.
 
  ![Drawing mazes](docs/screenshots/mazes.png)
+
+3D relief carving
+-----
+
+`rollingmill.relief3D` takes a 2D greyscale image and carves it as a depth-modulated relief: white pixels stay at the top of the stock, black pixels are cut down to the deepest Z. The chosen cutter's tip shape (ball-nose dome, V-bit cone, end-mill disc) is convolved into the heightmap so the finishing pass never tries to dive into detail the bit can't physically reach. The result is a single boustrophedon raster.
+
+This is a v1 *finishing pass only* — no roughing, no tool change. Use a ball-nose cutter, and rough out deep regions yourself first if your `--z-min` is more than a millimetre or two below the surface.
+
+Image-carving needs the `relief` extra:
+
+```
+pip install "rollingmill[relief]"
+```
+
+Then:
+
+```
+python -m rollingmill.relief3D \
+    --image my-photo.png \
+    --tool ball_3mm \
+    --stock-width 80 --stock-height 30 \
+    --z-min -1.5 \
+    --workspace G54 \
+    --out /tmp/relief.gcode
+```
+
+The image is rescaled to fit `--stock-width × --stock-height` at the resampling pitch (`--pitch`, default = tool radius / 4). `--stepover` controls raster row spacing (default = tool diameter × 0.3). `--gamma` applies a tone curve to the heightmap, and `--invert` flips the brightness-to-depth mapping. Defaults for feed, plunge feed and spindle RPM are pulled from the `--tool` entry.
+
+Then load on the machine: `rollingmill --file /tmp/relief.gcode`.
 
 V-carving an SVG
 -----
@@ -307,6 +353,30 @@ python -m rollingmill.vcarve \
 The page is mapped 1:1 onto the bed with the SVG's top-left at `(--x0, --y0)` and the Y axis flipped to the machine's front-left origin. `--medial-step` sets how finely a filled outline is sampled for the Voronoi medial (mm, default 0.15); finer resolves narrow necks and small counters at the cost of speed. Depth is clamped to `--max-depth` and reached in `--stepdown` roughing passes; `--min-depth` floors faint filled grooves without blunting the sharp letter terminals (it does not affect strokes, whose depth is exact from their width). `--stroke-flatten` controls how finely curved strokes are sampled, and `--no-markers` skips arrowhead expansion. `--preview` writes **two** companion files: a carved-surface **PNG** — modelling the swath the V-bit actually removes (a cone of radius `depth × tan(half_angle)` around each toolpath), colouring every pixel by the *deepest* cut reaching it (deep = blue, shallow = pale), supersampled and antialiased — and a vector **SVG** of the recovered toolpath centrelines, each a thin depth-coloured line (tool placement vs the PNG's removed area). Both are in the drawing's orientation; they default to `<out>.png`/`<out>.svg`, or pass `--preview path.png`. `--preview-pitch` sets the PNG resolution in mm/px (default 0.25 → ~1200 px for a 300 mm page; smaller makes a larger image). `--half-angle`, feeds and RPM default from the `--tool` entry. Pass `--png <mask.png>` instead of `--svg` to medial-axis a pre-rendered raster mask directly (the raster skeletoniser fallback, mainly for testing); `--pitch` then sets its mm/pixel resolution.
 
 Then load on the machine: `rollingmill --file /tmp/vcarve.gcode`.
+
+Turning totems on the rotary axis
+-----
+
+`rollingmill.totem` renders a stack of turned-spindle shapes as 4-axis g-code for the MDX-40A with the ZCL-40A rotary attachment. The workpiece extends along **X**, the **A** axis rotates it around X, and each section of the totem is a cross-section shape (cylinder, ellipse, donut, or regular polygon) stacked along the length.
+
+```
+python -m rollingmill.totem \
+    --out /tmp/totem.gcode \
+    --shape cylinder:10:20 \
+    --shape hex:12:15 \
+    --shape donut:14:25 \
+    --shape square:11:18 \
+    --shape empty:10 \
+    --stock-radius 15 --safe-radius 20 \
+    --tool end_6mm \
+    --workspace G54
+```
+
+Each `--shape NAME:SIZE:LENGTH` stacks one section on the totem in command-line order, starting at `--x0`. `SIZE` is the **circumscribed / maximum radius** in mm (distance from the rotation axis to a polygon corner, or to the cylinder/ellipse outer radius). `LENGTH` is the extent along X in mm. Valid shapes are `cylinder`, `ellipse`, `donut` (a half-sine bead bulging from `size/2` at the ends to `size` at the centre), the regular polygons `triangle` / `square` / `pentagon` / `hex` / `octagon`, and `empty` (a no-cut spacer specified as `empty:LENGTH`).
+
+Round shapes step A finely (`--angle-step`, default 5°) and sweep X back-and-forth at each Z depth. Polygon shapes index A to one position per face and raster the face rectangle in X/Y at descending Z; each face overshoots the inset rectangle in Y toward its next-to-be-cut neighbour to pre-clear the shared corner so no unsupported wedge of stock is left behind, with the per-pass overshoot sized to the cylindrical stock's half-chord at the current Z (full extension at the deepest pass, none near the stock surface). Every A-axis rotation is preceded by a retract to `--safe-radius` (absolute Z clearance, must be ≥ `--stock-radius`) and a return to Y=0 so the tool clears the partly-cut workpiece.
+
+Then load on the machine: `rollingmill --file /tmp/totem.gcode`.
 
 See also
 ----
