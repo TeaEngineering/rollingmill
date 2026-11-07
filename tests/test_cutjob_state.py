@@ -38,7 +38,7 @@ class _AckingMockUSB(MdxMockUSB):
         return len(data)
 
 
-def _new_job(payload: bytes = b'G0X0\rG0Y0\rG0Z0\r') -> CutJob:
+def _new_job(payload: bytes = b'G00 X0.0\rG00 Y0.0\rG00 Z0.0\r') -> CutJob:
     m = MDX40A(_AckingMockUSB())
     return CutJob.from_bytes(m, payload, 'test.nc')
 
@@ -156,17 +156,17 @@ def test_parse_nc_blocks_does_not_validate():
 def test_check_nc_accepts_parse_nc_blocks_output_directly():
     """check_nc takes the raw bytes output of parse_nc_blocks; no decoding
     needed at the call site."""
-    blocks = parse_nc_blocks(b"(hello)\nG01 X1.0\n(more)\n")
+    blocks = parse_nc_blocks(b"(hello)\nG00 X1.0\n(more)\n")
     assert list(check_nc(blocks)) == []
 
 
 def test_check_nc_clean_file_returns_no_warnings():
-    blocks = [b"(hello)\n", b"G01 X1.0\n", b"(more)\n"]
+    blocks = [b"(hello)\n", b"G00 X1.0\n", b"(more)\n"]
     assert list(check_nc(blocks)) == []
 
 
 def test_check_nc_flags_embedded_close_paren():
-    blocks = [b"G01 X1.0\n", b"(this (is) bad)\n", b"G01 Y2.0\n"]
+    blocks = [b"G00 X1.0\n", b"(this (is) bad)\n", b"G00 Y2.0\n"]
     warnings = check_nc(blocks)
     assert len(warnings) == 1
     w = warnings[0]
@@ -182,19 +182,19 @@ def test_check_nc_flags_embedded_open_paren():
 
 
 def test_check_nc_flags_unclosed_comment():
-    blocks = [b"G01 X1.0\n", b"G01 Y2.0\n", b"(forgot to close\n",
-              b"G01 Z3.0\n"]
+    blocks = [b"G00 X1.0\n", b"G00 Y2.0\n", b"(forgot to close\n",
+              b"G00 Z3.0\n"]
     warnings = check_nc(blocks)
     assert len(warnings) == 1
     assert warnings[0].rule == RULE_PAREN_UNCLOSED
     assert warnings[0].line == 3
 
 
-def test_check_nc_ignores_parens_in_non_comment_lines():
-    # A code line that happens to contain '(' or ')' mid-stream is NOT
-    # subject to the rule -- only lines that *start* with '(' are
-    # treated as comments by the firmware.
-    assert list(check_nc([b"G01 X1.0 ( inline ) F100\n"])) == []
+def test_check_nc_paren_rules_ignore_non_comment_lines():
+    # A code line that happens to contain '(' or ')' mid-stream is not a
+    # comment line, so rules 1 and 2 do not apply (rule 5 flags it instead).
+    warnings = check_nc([b"G00 X1.0 ( inline ) F100\n"])
+    assert [w.rule for w in warnings] == [5]
 
 
 def test_check_nc_locates_column_of_first_embedded_paren():
@@ -211,7 +211,7 @@ def test_check_nc_accepts_empty_comment():
 
 def test_check_nc_reports_all_warnings_not_just_first():
     """The lint should surface every issue so the user can fix in one pass."""
-    blocks = [b"(bad (one))\n", b"G01 X1.0\n", b"(unclosed\n"]
+    blocks = [b"(bad (one))\n", b"G00 X1.0\n", b"(unclosed\n"]
     warnings = check_nc(blocks)
     assert len(warnings) == 2
     rules = sorted(w.rule for w in warnings)
@@ -231,7 +231,7 @@ def test_from_bytes_rejects_files_with_warnings():
 
 def test_main_clean_file_returns_zero(tmp_path, capsys):
     p = tmp_path / "clean.nc"
-    p.write_bytes(b"(ok)\nG01 X1.0\n")
+    p.write_bytes(b"(ok)\nG00 X1.0\n")
     rc = check_main([str(p)])
     out = capsys.readouterr().out
     assert rc == 0
@@ -243,7 +243,7 @@ def test_main_reports_warnings_in_three_line_format(tmp_path, capsys):
     three lines per warning (header, source, caret). capsys captures
     non-TTY stdout, so ANSI codes are absent."""
     p = tmp_path / "bad.nc"
-    p.write_bytes(b"G01 X1.0\n(bad (paren))\n")
+    p.write_bytes(b"G00 X1.0\n(bad (paren))\n")
     rc = check_main([str(p)])
     captured = capsys.readouterr()
     assert rc == 1
@@ -276,7 +276,7 @@ def test_tui_main_bails_on_bad_file_before_usb(tmp_path, monkeypatch, capsys):
     warnings and exit *before* MdxUSB.discover() is invoked — there's no
     point handshaking the mill only to abort after reading the file."""
     p = tmp_path / "bad.nc"
-    p.write_bytes(b"G01 X1.0\n(bad (paren))\n")
+    p.write_bytes(b"G00 X1.0\n(bad (paren))\n")
 
     # Sentinel that fails the test if USB discovery is reached.
     from rollingmill import usb as usb_mod

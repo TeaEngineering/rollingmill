@@ -20,18 +20,23 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from erbsland_maze import (
-    Direction,
-    Generator,
-    GeneratorSetup,
-    Room,
-    SvgLayout,
-    SvgSetup,
-    Wall,
-)
-from erbsland_maze.line import Line
-from erbsland_maze.point import Point
-from erbsland_maze.poly_line import PolyLine
+try:
+    from erbsland_maze import (
+        Direction,
+        Generator,
+        GeneratorSetup,
+        Room,
+        SvgLayout,
+        SvgSetup,
+        Wall,
+    )
+    from erbsland_maze.line import Line
+    from erbsland_maze.point import Point
+    from erbsland_maze.poly_line import PolyLine
+except ImportError as exc:  # pragma: no cover - exercised only without the extra
+    raise ImportError(
+        "rollingmill.maze needs the 'maze' extra: pip install 'rollingmill[maze]'"
+    ) from exc
 
 
 ENDPOINT_MODES = ("none", "outline", "filled")

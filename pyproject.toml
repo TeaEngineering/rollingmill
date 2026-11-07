@@ -33,7 +33,6 @@ classifiers = [
 dependencies = [
     "pyusb>=1.2",
     "pyhershey>=0.1",
-    "erbsland-maze>=1.4.8",
     "setuptools",          # pyhershey imports pkg_resources; drop when upstream moves to importlib.metadata
 ]
 
@@ -43,6 +42,9 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.6",
     "mypy>=1.10",
+]
+maze = [
+    "erbsland-maze>=1.4.8",   # imports pycairo, which builds against system cairo on Linux
 ]
 
 [project.scripts]
