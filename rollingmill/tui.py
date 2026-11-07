@@ -11,8 +11,8 @@ Keybindings:
   a / z      Z axis  +/−  (a raises, z lowers)
   [/]        A axis  −/+
   Esc        cancel in-flight jog
-  f          cycle jog speed: vslow / slow / medium / fast (default slow)
-  1/2/3/4/5  XYZ step: 0.01/0.1/1.0/10.0/50.0 mm  A step: 0.01/0.1/1.0/10.0/90.0°
+  j          toggle step / continuous jog (direction starts; Esc stops)
+  f          cycle pulse size/feed: 0.01/6, 0.1/60, 1/600, 5/3000 mm/mm-min
   s          spindle on / off (toggle)
   d          A-axis rotary drilling on / off (toggle; Drill Workpiece dialog)
   < / >      spindle target RPM  −500 / +500
@@ -20,6 +20,7 @@ Keybindings:
   c          open coordinate systems dialog (activate / move-to / overwrite)
   m          open Move-To picker (presets + User Specify numeric entry)
   t          open tool diameter offsets dialog
+  b          Z0 sensor probing (Y confirms; Esc stops)
   q          quit
 
 Cut panel (visible when --file is given):
@@ -38,29 +39,24 @@ import time
 from typing import Optional, Tuple
 import sys
 
+import usb.core
+
 from . import machine as _machine
 from . import trace as _trace
 from .machine import (FLAG_VIEW_LED, FLAG_DOOR, FLAG_SPINDLE, FLAG_CMD_MOVE,
                       FLAG_TOOLBTN, FLAG_NC_READY, FLAG_MOVING, FLAG_BUSY,
-                      FLAG_ERROR, FLAG_STATE, FLAG_STATE_SHIFT, JOG_SPEED_MAX,
+                      FLAG_ERROR, FLAG_STATE, FLAG_STATE_SHIFT,
                       STATE_MAP, WCS_SLOT_NAMES)
 from .check import lint_file
 from .trace import Tracer
 from .cutjob import CutJob
+from .probing import ZProbe
+from .keyrelease import HeldKeys
 
 # ── Jog parameters ────────────────────────────────────────────────────────────
 
-STEPS_LINEAR = [0.01, 0.1, 1.0, 10.0, 50.0]   # XYZ jog distances (mm)
-STEPS_ROTARY = [0.01, 0.1, 1.0, 10.0, 90.0]   # A jog distances (degrees)
-
-# Jog speed presets cycled by the `f` key (mm/min).
-# slow = VPanel continuous-jog ramp start (240); fast = firmware max (0xFFFF).
-SPEED_PRESETS = [
-    ('vslow',  120),
-    ('slow',   240),
-    ('medium', 480),
-    ('fast',   JOG_SPEED_MAX),
-]
+# Each pulse takes 100 ms at its paired feed. Rotary uses degrees/degree-min.
+JOG_PULSES = [(0.01, 6), (0.1, 60), (1.0, 600), (5.0, 3000)]
 
 # ── Colour pair IDs ───────────────────────────────────────────────────────────
 
@@ -112,11 +108,21 @@ class TUI:
         self._m            = machine
         self._log          = log_buf
         self._tracer       = tracer
-        self._step_i       = 2           # index into STEPS_LINEAR / STEPS_ROTARY (default 1.0mm / 1.0°)
-        self._speed_i      = 1           # index into SPEED_PRESETS; `f` cycles (default slow)
+        self._pulse_i = 3  # default 5 mm at 3000 mm/min
         self._moving       : Optional[str] = None   # axis currently jogging (None → idle)
         self._jog_armed    = False                   # True between send_jog() and post-motion settle
         self._jog_sent_at  = 0.0                     # monotonic timestamp of last send_jog()
+        self._held_keys = HeldKeys()
+        self._jog_window = None
+        self._continuous = True
+        self._repeat_direction = None
+        self._repeat_last = None
+        self._repeat_deadline = 0.0
+        self._repeat_blocked = False
+        self._continuous_axis = None
+        self._continuous_sign = 0
+        self._continuous_next = 0.0
+        self._jog_last_fresh = 0.0
         self._quit         = False
         self._last_poll    = 0.0                     # monotonic timestamp of last machine.poll()
         # WCS overlay dialog state
@@ -136,6 +142,8 @@ class TUI:
         self._tool_data     : Optional[list] = None   # list[8] float|None
         self._tool_editing  = False
         self._tool_edit_buf = ''
+        self._probe = ZProbe(machine)
+        self._probe_confirm = False
 
     # ── Entry point ───────────────────────────────────────────────────────────
 
@@ -143,16 +151,18 @@ class TUI:
         self._init_colors()
         curses.curs_set(0)
         stdscr.nodelay(True)
-        # getch() returns every 100 ms — our cooperative tick
-        stdscr.timeout(100)
+        # getch() returns every 25 ms — our cooperative tick
+        stdscr.timeout(25)
         # ncurses defaults ESCDELAY to ~1000 ms to see if Esc is the start of an
         # arrow/function-key sequence. Drop it to 25 ms so Esc is delivered on
         # the next tick.
         curses.set_escdelay(25)
 
+        self._held_keys.start()
+
         while not self._quit:
             try:
-                key = stdscr.getch()
+                key = self._held_keys.read(stdscr)
             except curses.error:
                 key = -1
 
@@ -163,17 +173,28 @@ class TUI:
 
             if self._coord_entry_pending:
                 self._coord_entry_pending = False
-                self._coord_entry_dialog(stdscr)
+                self._held_keys.suspend()
+                try:
+                    self._coord_entry_dialog(stdscr)
+                finally:
+                    self._held_keys.start()
                 stdscr.clear()
+
+            self._service_continuous_jog()
 
             # Ping handoff — drive machine polling from the main loop.
             now = time.monotonic()
             if now - self._last_poll >= _machine.POLL_INTERVAL:
-                self._m.poll()
+                fresh = self._probe.poll() if self._probe.active else self._m.poll()
+                self._probe.update(fresh)
+                if fresh is not None:
+                    self._jog_last_fresh = time.monotonic()
+                elif self._continuous_axis is not None:
+                    self._stop_continuous_jog()
                 self._last_poll = now
                 self._update_jog_indicator()
 
-            if self._cut_job:
+            if self._cut_job and not self._probe.active:
                 self._cut_job.service()
 
             self._draw(stdscr)
@@ -210,6 +231,33 @@ class TUI:
     # ── Input ─────────────────────────────────────────────────────────────────
 
     def _handle_key(self, key: int) -> None:
+        if self._continuous_axis is not None:
+            if key in (27, ord("q"), ord("Q"), ord("j"), ord("J")):
+                self._stop_continuous_jog()
+                return
+            if key not in (curses.KEY_LEFT, curses.KEY_RIGHT, curses.KEY_UP, curses.KEY_DOWN, ord("a"), ord("A"), ord("z"), ord("Z"), ord("["), ord("]")):
+                return
+
+        if self._m.move_active:
+            if key in (27, ord('q'), ord('Q')):
+                self._m.stop_motion()
+            return  # Keep polling and block competing commands until idle.
+
+        if self._probe.active:
+            if key in (27, ord('q'), ord('Q')):
+                self._probe.cancel()
+            return  # No jog, spindle, WCS edits or NC streaming during probing.
+        if self._probe_confirm:
+            if key in (27, ord('n'), ord('N'), ord('q'), ord('Q')):
+                self._probe_confirm = False
+            elif key in (ord('y'), ord('Y')):
+                self._probe_confirm = False
+                try:
+                    self._probe.start()
+                    self.annotate("KEY b  Z0 probe confirmed")
+                except (ValueError, usb.core.USBError) as exc:
+                    logging.getLogger(__name__).warning("Z-probe: %s", exc)
+            return
         # Modal dialogs swallow all keys while open
         if self._wcs_open:
             self._wcs_handle_key(key)
@@ -222,6 +270,8 @@ class TUI:
             return
 
         if key == 27:                                  # Esc — cancel an in-flight jog
+            self._repeat_blocked = True
+            self._repeat_last = time.monotonic()
             if self._jog_armed:
                 self._m.stop_motion()
                 self._jog_armed = False
@@ -277,14 +327,18 @@ class TUI:
             self._start_jog(axis, sign)
             return
 
-        if key in (ord('f'), ord('F')):
-            self._speed_i = (self._speed_i + 1) % len(SPEED_PRESETS)
-            self.annotate(f"KEY f  speed={SPEED_PRESETS[self._speed_i][0]}")
-        elif key in (ord('1'), ord('2'), ord('3'), ord('4'), ord('5')):
-            self._step_i = key - ord('1')
-            lin = STEPS_LINEAR[self._step_i]
-            rot = STEPS_ROTARY[self._step_i]
-            self.annotate(f"KEY {chr(key)}  step={lin}mm/{rot}°")
+        if key in (ord("j"), ord("J")):
+            self._continuous = not self._continuous
+            self._repeat_direction = None
+            self._repeat_last = None
+            self._repeat_blocked = False
+            if self._continuous:
+                self._held_keys.start()
+            self.annotate("Jog mode: " + ("CONTINUOUS — hold direction; release stops" if self._continuous else "STEP"))
+        elif key in (ord('f'), ord('F')):
+            self._pulse_i = (self._pulse_i + 1) % len(JOG_PULSES)
+            pulse, feed = JOG_PULSES[self._pulse_i]
+            self.annotate(f"KEY f  pulse={pulse:g}mm feed={feed}mm/min")
         elif key in (ord('s'), ord('S')):
             self._toggle_spindle()
         elif key == ord('<'):
@@ -303,6 +357,11 @@ class TUI:
             self._move_open_dialog()
         elif key in (ord('t'), ord('T')):
             self._tool_open_dialog()
+        elif key in (ord('b'), ord('B')):
+            if self._cut_job or self._jog_armed or self._drill_active:
+                logging.getLogger(__name__).warning("Close the NC job and stop jogging/drilling before Z-probing")
+            else:
+                self._probe_confirm = True
         elif key in (ord('p'), ord('P')):
             self._m.fetch_axis_snapshot()
 
@@ -336,12 +395,98 @@ class TUI:
         parts.append('q quit')
         return '  '.join(parts)
 
+    def _stop_continuous_jog(self) -> None:
+        if self._continuous_axis is not None:
+            self._m.stop_motion()
+            self._m._set_operation_mode(False)
+        self._continuous_axis = None
+        self._repeat_blocked = True
+        self._repeat_direction = None
+        self._repeat_last = time.monotonic()
+        self._moving = None
+        self._jog_armed = False
+
+    def _service_continuous_jog(self) -> None:
+        if self._continuous_axis is None:
+            return
+        now = time.monotonic()
+        held = (self._held_keys.held(self._continuous_axis, self._continuous_sign, self._jog_window)
+                if self._held_keys.supported else now < self._repeat_deadline)
+        if not held:
+            self._stop_continuous_jog()
+            return
+        state = self._m.state
+        if now - self._jog_last_fresh > 0.75 or state.flags & (FLAG_DOOR | FLAG_ERROR):
+            self._stop_continuous_jog()
+            return
+        if now < self._continuous_next:
+            return
+        axis = self._continuous_axis
+        delta, speed = JOG_PULSES[self._pulse_i]
+        try:
+            self._m.send_jog(axis, self._continuous_sign * delta, speed=speed)
+        except Exception:
+            self._stop_continuous_jog()
+            logging.getLogger('tui').exception("Continuous jog failed")
+            return
+        self._continuous_next = now + 0.1
+
     def _start_jog(self, axis: str, sign: int) -> None:
+        now = time.monotonic()
+        repeat_ready = False
+        fallback = self._continuous and not self._held_keys.supported
+        if fallback:
+            stamp = self._held_keys.event_time
+            if not isinstance(stamp, (int, float)):
+                stamp = now  # Direct callers/tests do not have a queued event.
+            if now - stamp >= 0.2:
+                return  # Buffered presses must not renew a motion lease.
+            gap = float('inf') if self._repeat_last is None else stamp - self._repeat_last
+            if self._repeat_blocked and gap <= 0.2:
+                self._repeat_last = stamp
+                return  # Esc/stop cannot be undone by the remaining repeats.
+            if self._repeat_blocked:
+                self._repeat_direction = None
+            self._repeat_blocked = False
+            direction = (axis, sign)
+            repeat_ready = direction == self._repeat_direction and 0 <= gap <= 1.0
+            self._repeat_direction = direction
+            self._repeat_last = stamp
+            self._repeat_deadline = stamp + 0.2
+        if self._continuous and not fallback:
+            repeat_ready = self._held_keys.event_type == 2
+        if self._continuous and repeat_ready:
+            if self._continuous_axis is not None:
+                if axis == self._continuous_axis and sign == self._continuous_sign:
+                    return  # Refresh the lease, without restarting motion.
+                self._stop_continuous_jog()
+                return
+            if self._jog_armed or self._cut_job or self._drill_active:
+                return
+            window = self._held_keys.window
+            if not fallback and (window is None or not self._held_keys.held(axis, sign, window)):
+                return
+            self._jog_window = window
+            fresh = self._m.poll()
+            if fresh is None or not fresh.idle or fresh.flags & (FLAG_MOVING | FLAG_CMD_MOVE | FLAG_DOOR | FLAG_ERROR):
+                return
+            self._m._set_operation_mode(True)
+            self._continuous_axis = axis
+            self._continuous_sign = sign
+            self._continuous_next = 0.0
+            self._jog_last_fresh = time.monotonic()
+            self._moving = axis
+            self._jog_armed = True
+            suffix = "repeat timeout 200 ms" if fallback else "key release"
+            self.annotate(f"CONTINUOUS {axis} {sign:+d} — {suffix}; Esc stops")
+            self._service_continuous_jog()
+            return
+        if fallback and (self._cut_job or self._drill_active):
+            return
         if self._jog_armed:
             return  # previous jog still settling — ignore (no overlap)
-        step  = STEPS_ROTARY[self._step_i] if axis == 'A' else STEPS_LINEAR[self._step_i]
-        dist  = sign * step
-        speed = SPEED_PRESETS[self._speed_i][1]
+        step, speed = JOG_PULSES[self._pulse_i]
+        dist = sign * step
 
         unit = '°' if axis == 'A' else 'mm'
         self.annotate(
@@ -378,7 +523,7 @@ class TUI:
             raise the bits);
           - neither MOVING nor CMD_MOVE set on the cached state.
         """
-        if not self._jog_armed:
+        if self._continuous_axis is not None or not self._jog_armed:
             return
         if time.monotonic() - self._jog_sent_at < 0.2:
             return
@@ -442,9 +587,12 @@ class TUI:
             log_h   = rows - log_row
 
         self._draw_log(stdscr, log_row, log_h, cols)
+        operation_message = self._probe.message if self._probe.active else (self._m.move_message or self._probe.message)
+        if operation_message:
+            self._put(stdscr, max(0, log_row - 1), 0, operation_message)
 
         try:
-            stdscr.refresh()
+            stdscr.noutrefresh()
         except curses.error:
             pass
 
@@ -456,6 +604,32 @@ class TUI:
 
         if self._move_open:
             self._draw_move_dialog(stdscr, rows, cols)
+        if self._probe_confirm:
+            self._draw_probe_dialog(stdscr, rows, cols)
+
+        try:
+            curses.doupdate()
+        except curses.error:
+            pass
+
+    def _draw_probe_dialog(self, stdscr, rows, cols):
+        lines = [
+            "Set User (RML-1) Z origin using Z0 sensor",
+            "Connect and clean the sensor; place it on the workpiece.",
+            "Position the tool directly above it; close the cover.",
+            "Firmware uses its existing sensor thickness/settings.",
+            "Y starts descent and retract; Esc cancels this dialog.",
+        ]
+        if rows < 10 or cols < 30:
+            self._put(stdscr, 0, 0, "Z-probe: enlarge terminal; Esc cancels")
+            stdscr.noutrefresh()
+            return
+        width = min(cols - 2, 70)
+        win = curses.newwin(8, width, (rows - 8) // 2, (cols - width) // 2)
+        win.box()
+        for i, line in enumerate(lines, 1):
+            self._put(win, i, 2, line[:width - 4])
+        win.noutrefresh()
 
     def _draw_state(self, win: curses.window, height: int, cols: int) -> None:
         s     = self._m.state
@@ -463,14 +637,17 @@ class TUI:
         BOLD  = curses.A_BOLD
 
         # Row 0 — title bar
-        speed_lbl = SPEED_PRESETS[self._speed_i][0]
-        lin_lbl   = STEPS_LINEAR[self._step_i]
-        rot_lbl   = STEPS_ROTARY[self._step_i]
+        pulse, feed = JOG_PULSES[self._pulse_i]
         wcs_lbl   = WCS_SLOT_NAMES[self._m.active_wcs]
         rotary_lbl = {0: "No Extension", 1: "Rotary Axis", 2: "Rotary Vice"}.get(
             self._m.rotary_extension_byte, "?")
-        title     = f" Roland MDX-40A  │  {speed_lbl}  │  XYZ {lin_lbl}mm  A {rot_lbl}°  │  {wcs_lbl}  │  {rotary_lbl} "
+        title     = f" Roland MDX-40A  │  {wcs_lbl}  │  {rotary_lbl} "
         self._put(win, 0, 0, title.ljust(cols), CP(_CP_HEADER) | BOLD)
+
+        if height >= 2:
+            mode = "Hold" if self._continuous else "Step"
+            pulse_line = f" [f] Pulse: {pulse:g} mm  |  Feed: {feed} mm/min  |  {mode}  |  A: {pulse:g}°"
+            self._put(win, 1, 0, pulse_line[:cols], CP(_CP_VALUE) | BOLD)
 
         if height < 3:
             return
@@ -559,8 +736,8 @@ class TUI:
         ref_row = height - 2
         if ref_row > row + 1:
             key_lines = [
-                '  jog: ←→ X   ↑↓ Y   a/z Z   [] A    f speed (vslow/slow/medium/fast)   1-5 step',
-                '  s spindle   <> RPM   d A-drill   -/+ override%   c coords   m move-to   t tools   q quit',
+                f'  jog: ←→ X  ↑↓ Y  a(up)/z(down) Z  [] A   j mode={"CONTINUOUS (Esc stops)" if self._continuous else "STEP"}   f pulse (0.01/0.1/1/5mm)',
+                '  s spindle   <> RPM   d A-drill   -/+ override%   c coords   m move-to   t tools   b Z-probe   q quit',
             ]
             for i, line in enumerate(key_lines):
                 r = ref_row + i
@@ -628,7 +805,10 @@ class TUI:
         elif key == curses.KEY_DOWN:
             self._wcs_sel = min(len(WCS_SLOT_NAMES)-1, self._wcs_sel + 1)
         elif key in (10, 13):                      # Enter — activate
-            self._m.set_active_wcs(self._wcs_sel)
+            try:
+                self._m.set_active_wcs(self._wcs_sel)
+            except ValueError as exc:
+                logging.getLogger("tui").warning("Coordinate selection: %s", exc)
         elif key in (ord('m'), ord('M')):          # Move to stored origin
             if self._wcs_sel == 0:
                 return   # MCS origin is always (0,0,0,0) — no-op / already there
@@ -677,7 +857,7 @@ class TUI:
         win.addstr(0, 2, title[:dw - 4], CP(_CP_HEADER) | BOLD)
 
         if dh < 5:
-            win.refresh()
+            win.noutrefresh()
             return
 
         # Column headers
@@ -721,7 +901,7 @@ class TUI:
         win.addstr(ref_row,     1, '─' * (dw - 2), CP(_CP_LABEL))
         win.addstr(ref_row + 1, 1, keys[:dw - 2],  CP(_CP_KEYS))
 
-        win.refresh()
+        win.noutrefresh()
 
     # ── Tool diameter offsets dialog ──────────────────────────────────────────
 
@@ -794,7 +974,7 @@ class TUI:
         win.addstr(0, 2, ' Tool Diameter Offsets'[:dw - 4], CP(_CP_HEADER) | BOLD)
 
         if dh < 5:
-            win.refresh()
+            win.noutrefresh()
             return
 
         hdr = f"  {'Slot':4s}  {'Value (mm)':>12s}"
@@ -832,7 +1012,7 @@ class TUI:
         win.addstr(ref_row,     1, '─' * (dw - 2), CP(_CP_LABEL))
         win.addstr(ref_row + 1, 1, keys[:dw - 2],  CP(_CP_KEYS))
 
-        win.refresh()
+        win.noutrefresh()
 
     # ── Move-To picker ('m' key) ──────────────────────────────────────────────
 
@@ -846,7 +1026,7 @@ class TUI:
         """
         m = self._m
         targets = [
-            ('View Position',     lambda: m.move_to_view_position()),
+            ('Preview / View Position (MCS)', lambda: m.move_to_view_position()),
             ('X Origin',          lambda: m.move_to_origin(0x1)),
             ('Y Origin',          lambda: m.move_to_origin(0x2)),
             ('Z Origin',          lambda: m.move_to_origin(0x4)),
@@ -855,8 +1035,6 @@ class TUI:
         rotary = m.rotary_extension_byte
         if rotary is not None and rotary >= 1:
             targets.append(('A Origin',          lambda: m.move_to_origin(0x8)))
-        if rotary is not None and rotary >= 2:
-            targets.append(('Rotation center Y', lambda: m.move_to_rotation_center_y()))
         targets.append(('User Specified…', None))   # None → open numeric entry dialog
         return targets
 
@@ -909,7 +1087,7 @@ class TUI:
         win.erase()
         win.box()
 
-        wcs_lbl = 'MCS' if self._m.active_wcs == 0 else f'WCS{self._m.active_wcs}'
+        wcs_lbl = _machine.wcs_label(self._m.active_wcs)
         title = f' Move To  (using {wcs_lbl})'
         win.addstr(0, 2, title[:dw - 4], CP(_CP_HEADER) | BOLD)
         win.addstr(1, 1, '─' * (dw - 2), CP(_CP_LABEL))
@@ -930,7 +1108,7 @@ class TUI:
         win.addstr(ref_row,     1, '─' * (dw - 2), CP(_CP_LABEL))
         win.addstr(ref_row + 1, 1, keys[:dw - 2],  CP(_CP_KEYS))
 
-        win.refresh()
+        win.noutrefresh()
 
     # ── Coordinate entry dialog (blocking, 'c' key) ───────────────────────────
 
@@ -951,7 +1129,7 @@ class TUI:
 
         CP   = curses.color_pair
         BOLD = curses.A_BOLD
-        wcs_lbl = 'MCS' if self._m.active_wcs == 0 else f'WCS{self._m.active_wcs}'
+        wcs_lbl = _machine.wcs_label(self._m.active_wcs)
 
         win.erase()
         win.box()
@@ -1036,21 +1214,15 @@ class TUI:
         for b, default in zip(bufs, defaults):
             b = b.strip()
             if not b:
-                final_display.append(default)
+                final_display.append(None)
                 continue
             try:
                 final_display.append(float(b))
             except ValueError:
                 final_display.append(default)
 
-        # Convert WCS-relative display coords back to machine coords
-        ox, oy, oz, oa = self._m.wcs_offset
-        mx = final_display[0] + ox
-        my = final_display[1] + oy
-        mz = final_display[2] + oz
-        ma = final_display[3] + oa
-
-        self._m.move_to_machine_pos(mx, my, mz, ma)
+        # Resolve through the same selected-CS path as origin presets.
+        self._m.move_to_position(*final_display)
 
     def _draw_nc_panel(self, win: curses.window, start: int, height: int, cols: int) -> None:
         if not self._cut_job or height < 2:
@@ -1186,7 +1358,20 @@ def main(argv=None) -> int:
         tui = TUI(m, log_buf, t)
         if args.file:
             tui.load_nc_file(args.file)
-        curses.wrapper(tui.run)
+        try:
+            def run_with_cleanup(screen):
+                try:
+                    tui.run(screen)
+                finally:
+                    tui._stop_continuous_jog()
+                    tui._probe.close()
+                    m.close_move()
+                    tui._held_keys.close()  # Restore before curses leaves alternate screen.
+            curses.wrapper(run_with_cleanup)
+        finally:
+            tui._stop_continuous_jog()
+            tui._probe.close()
+            tui._held_keys.close()
 
 
 if __name__ == '__main__':

@@ -215,6 +215,8 @@ class MDX40A:
         self._spindle_live_speed: Optional[int] = None       # latest GET 0x3003 uint32 — current spindle/feed speed
         self._spindle_target_rpm: int = SPINDLE_RPM_MIN  # configured target RPM (GET/SET 0x3900/0x3901)
         self._spindle_secs: Optional[int] = None
+        self._absolute_move = None
+        self.move_message = ""
         self._active_wcs: int   = 0                      # 0=MCS, 1-10=WCS1-WCS10
         self._wcs_offset: tuple = (0.0, 0.0, 0.0, 0.0)  # machine coords of active WCS origin (mm/deg)
         self._rotary_extension_byte: Optional[int] = None    # latest GET 0x3800 byte (0=none, 1=rotary, 2=rotary+vice)
@@ -250,6 +252,8 @@ class MDX40A:
         polling_update_state_and_push_UI → state-change dispatcher path,
         which auto-pops the error dialog on the same transition.
         """
+        if self.move_active:
+            return self._poll_absolute_move()
         s = self._read_state()
         prev_ping = self._last_ping_word
         self._ping_status()
@@ -455,6 +459,9 @@ class MDX40A:
 
     def stop_motion(self) -> None:
         """Send immediate motion stop (SET wValue=0x03f3)."""
+        if self.move_active:
+            self._absolute_move["cancelled"] = True
+            self.move_message = "Move stop requested; waiting for idle"
         try:
             self._link.vend_set(0x03f3)
             log.info("Motion stop sent (SET 0x03f3)")
@@ -850,16 +857,12 @@ class MDX40A:
         """
         if not 0 <= slot <= 10:
             raise ValueError(f"WCS slot must be 0–10, got {slot}")
-        try:
-            log.info("Active WCS → %s", wcs_label(slot))
-            self._active_wcs = slot
-            if slot == 0:
-                self._wcs_offset = (0.0, 0.0, 0.0, 0.0)
-            else:
-                origin = self.get_wcs_origin(slot)
-                self._wcs_offset = origin if origin else (0.0, 0.0, 0.0, 0.0)
-        except usb.core.USBError as e:
-            log.warning("set_active_wcs(%s) failed: %s", wcs_label(slot), e)
+        origin = (0.0, 0.0, 0.0, 0.0) if slot == 0 else self.get_wcs_origin(slot)
+        if origin is None:
+            raise ValueError(f"Cannot read {wcs_label(slot)}; previous coordinate system retained")
+        self._active_wcs = slot
+        self._wcs_offset = origin
+        log.info("Active WCS → %s", wcs_label(slot))
 
     def write_wcs_origin(
         self, slot: int,
@@ -1144,23 +1147,92 @@ class MDX40A:
 
         RE: FUN_00419ef0 @ 0x00419ef0 — absolute position move (flags=0xFFFF),
         wrapped in operation bracket SET 0x1109 (0x00 begin / 0xff end).
-        Fire-and-forget: returns once the four control transfers are sent;
+        Fire-and-forget: returns after the operation begin and target are sent;
         the caller observes motion completion via subsequent poll() cycles.
         """
-        payload = struct.pack(
-            '>HH4i', speed, 0xFFFF,
-            round(x_mm * 1000), round(y_mm * 1000),
-            round(z_mm * 1000), round(a_deg * 1000),
-        )
+        if self.move_active:
+            raise ValueError("An absolute move is already active")
+        # 0xffff is a preset sentinel, not the numeric speed used by VPanel's
+        # absolute-move callers (120 or 3000). Use the confirmed maximum.
+        actual_speed = 3000 if speed == JOG_SPEED_MAX else speed
+        if not 1 <= actual_speed <= 3000:
+            raise ValueError("Absolute move speed must be 1–3000 mm/min")
+        payload = struct.pack('>HH4i', actual_speed, 0xffff,
+                              round(x_mm * 1000), round(y_mm * 1000),
+                              round(z_mm * 1000), round(a_deg * 1000))
+        now = time.monotonic()
+        self._absolute_move = {"target": (x_mm, y_mm, z_mm, a_deg),
+                               "started": now, "fresh": now,
+                               "seen": False, "cancelled": False}
         try:
+            self._link.vend_set(0x03f5, b'\x02')
             self._link.vend_set(0x1109, b'\x00')
             self._link.vend_set(0x04f7, payload)
-            self._link.vend_set(0x3f2)
-            self._link.vend_set(0x1109, b'\xff')
-            log.info("Move to machine (%.3f, %.3f, %.3f, %.3f°) speed=%d",
-                     x_mm, y_mm, z_mm, a_deg, speed)
-        except usb.core.USBError as e:
-            log.warning("move_to_machine_pos failed: %s", e)
+            self.move_message = "Move-To sent; waiting for motion"
+            log.info("Move to machine %s speed=%d", self._absolute_move["target"], actual_speed)
+        except usb.core.USBError:
+            self.stop_motion()
+            self.move_message = "Move write failed; result unverified, waiting for idle"
+            raise
+
+    @property
+    def move_active(self) -> bool:
+        return self._absolute_move is not None
+
+    def _finish_absolute_move(self) -> None:
+        # VPanel's operation unwinder runs only after its motion wait.
+        for cmd, data in ((0x03f2, b''), (0x03f5, b'\xff'), (0x1109, b'\xff')):
+            self._link.vend_set(cmd, data)
+        self._absolute_move = None
+
+    def _poll_absolute_move(self):
+        operation = self._absolute_move
+        now = time.monotonic()
+        try:
+            raw = self._link.vend_get(0x0100, 32)
+            state = _decode_state(raw) if len(raw) == 32 else None
+        except usb.core.USBError:
+            state = None
+        if state is None:
+            if now - operation["fresh"] > 3 and not operation["cancelled"]:
+                self.stop_motion()
+                self.move_message = "Move status lost; stop requested, waiting for idle"
+            return None
+        self._state = state
+        operation["fresh"] = now
+        moving = bool(state.flags & (FLAG_MOVING | FLAG_CMD_MOVE))
+        operation["seen"] |= moving
+        current = (state.x_mm, state.y_mm, state.z_mm, state.a_deg)
+        reached = all(abs(a - b) <= 0.002 for a, b in zip(current, operation["target"]))
+        if (state.flags & (FLAG_DOOR | FLAG_ERROR) or now - operation["started"] > 120) and not operation["cancelled"]:
+            self.stop_motion()
+            self.move_message = "Move interrupted; stop requested, waiting for idle"
+        if not moving and state.idle:
+            if operation["cancelled"]:
+                self.move_message = "Move stopped; target not verified"
+            elif reached:
+                self.move_message = "Move-To complete; target position confirmed"
+            elif operation["seen"]:
+                self.move_message = "Move ended before target; result unverified"
+            elif now - operation["started"] > 2:
+                self.stop_motion()
+                self.move_message = "Move did not start; stop requested, result unverified"
+            else:
+                return state  # Idle before acknowledgement is not completion.
+            try:
+                self._finish_absolute_move()
+            except usb.core.USBError:
+                self.move_message = "Move cleanup failed; waiting for reconnection"
+            log.info(self.move_message)
+        return state
+
+    def close_move(self):
+        if self.move_active:
+            self.stop_motion()
+            try:
+                self._finish_absolute_move()
+            except usb.core.USBError:
+                log.warning("Absolute-move cleanup failed on exit")
 
     # ── Move-to-origin presets (firmware-resolved) ────────────────────────────
 
@@ -1191,9 +1263,9 @@ class MDX40A:
         wcs: Optional[int] = None,
         speed: int = JOG_SPEED_MAX,
     ) -> None:
-        """Move the selected axes to their stored origin in the given WCS (SET 0x3501).
+        """Move selected axes to the selected origin using an absolute machine move.
 
-        Payload `>HHH` — (wcs_code, axis_mask, speed). `wcs` defaults to the
+        Uses move_to_position and absolute machine coordinates. `wcs` defaults to the
         currently-active WCS. `axis_mask` is a bitfield: 1=X, 2=Y, 4=Z, 8=A
         (and combinations: 3=XY). VPanel only ever sends {1, 2, 3, 4, 8} from
         the Move dropdown — anything else is rejected.
@@ -1205,11 +1277,30 @@ class MDX40A:
             raise ValueError(
                 f"axis_mask must be one of {self._VALID_MOVE_AXIS_MASKS}, got {axis_mask}"
             )
-        wcs_code = self._active_wcs if wcs is None else wcs
-        self._send_bracketed(
-            0x3501, struct.pack('>HHH', wcs_code, axis_mask, speed),
-            f"Move to origin: wcs={wcs_label(wcs_code)} mask=0x{axis_mask:x} speed={speed}",
-        )
+        target = [0.0 if axis_mask & (1 << i) else None for i in range(4)]
+        self.move_to_position(*target, wcs=wcs, speed=speed)
+
+    def move_to_position(self, x=None, y=None, z=None, a=None,
+                         wcs: Optional[int] = None, speed: int = 1800) -> None:
+        """Move in selected coordinates; omitted axes preserve machine position."""
+        slot = self._active_wcs if wcs is None else wcs
+        if not 0 <= slot <= 10:
+            raise ValueError("WCS slot must be 0–10")
+        origin = (0.0, 0.0, 0.0, 0.0) if slot == 0 else self.get_wcs_origin(slot)
+        if origin is None:
+            raise ValueError("Cannot read selected coordinate origin; move cancelled")
+        state = self.poll()
+        if state is None:
+            raise ValueError("Cannot read current position; move cancelled")
+        if not state.idle or state.flags & (FLAG_MOVING | FLAG_CMD_MOVE | FLAG_DOOR | FLAG_ERROR):
+            raise ValueError("Machine must be idle with cover closed before Move-To")
+        current = (state.x_mm, state.y_mm, state.z_mm, state.a_deg)
+        target = [current[i] if value is None else value + origin[i]
+                  for i, value in enumerate((x, y, z, a))]
+        if slot == self._active_wcs:
+            self._wcs_offset = origin
+        log.info("Move in %s: target=%s; machine target=%s", wcs_label(slot), (x, y, z, a), target)
+        self.move_to_machine_pos(*target, speed=speed)
 
     def move_to_rotation_center_y(self, speed: int = JOG_SPEED_MAX) -> None:
         """Move Y onto the rotary A-axis centreline (SET 0x3808, mode=2).

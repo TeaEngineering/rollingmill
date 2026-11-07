@@ -34,7 +34,7 @@ dependencies = [
     "pyusb>=1.2",
     "pyhershey>=0.1",
     "erbsland-maze>=1.4.8",
-    "setuptools",          # pyhershey imports pkg_resources; drop when upstream moves to importlib.metadata
+    "setuptools<81",       # pyhershey imports pkg_resources; drop when upstream moves to importlib.metadata
 ]
 
 [project.optional-dependencies]

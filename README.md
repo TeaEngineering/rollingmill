@@ -47,11 +47,10 @@ The interactive TUI exposes the following keybindings:
 |-----|--------|
 | <kbd>←</kbd> / <kbd>→</kbd> | X axis −/+ |
 | <kbd>↑</kbd> / <kbd>↓</kbd> | Y axis −/+ |
-| <kbd>a</kbd> / <kbd>z</kbd> | Z axis +/− (`a` raises, `z` lowers) |
+| <kbd>a</kbd> / <kbd>z</kbd> | Z axis +/− (`a(up)` raises, `z(down)` lowers) |
 | <kbd>[</kbd> / <kbd>]</kbd> | A axis −/+ |
 | <kbd>Esc</kbd> | cancel an in-flight jog |
-| <kbd>f</kbd> | cycle jog speed: vslow / slow / medium / fast |
-| <kbd>1</kbd>…<kbd>5</kbd> | step size: XYZ 0.01 / 0.1 / 1.0 / 10.0 / 50.0 mm — A 0.01 / 0.1 / 1.0 / 10.0 / 90.0° |
+| <kbd>f</kbd> | cycle pulse/feed: 0.01 mm / 6 mm/min, 0.1 / 60, 1 / 600, 5 / 3000 |
 
 **Spindle**
 
@@ -66,9 +65,11 @@ The interactive TUI exposes the following keybindings:
 
 | Key | Action |
 |-----|--------|
+| <kbd>j</kbd> | hold / fixed-step jog; standard terminals stop 200 ms after repeats cease |
 | <kbd>c</kbd> | coordinate systems (activate / move-to / overwrite) |
 | <kbd>m</kbd> | Move-To picker (presets + User Specify numeric entry) |
 | <kbd>t</kbd> | tool diameter offsets |
+| <kbd>b</kbd> | Z0 sensor probing (User/RML-1; Y confirms, Esc stops) |
 | <kbd>q</kbd> | quit |
 
 **Cut panel** (only when `--file` is given)
@@ -87,7 +88,7 @@ Gotchas/Notes using the mill
 * Single-stepping nc-code _partially works_, but the MDX complains about being starved of NC code and lights the View-LED when you reach a cutting operation.
 * The progress display during a cutting job is that of filling the machine buffer, rather than the actual block being executed, which usually runs a few blocks behind. It's a shame there are not two counters so that this could be made 100% accurate.
 * There might be an issue with storing A-axis values in workspace offsets and recalling them, as sometimes I get an extra +360° rotation on recall.
-* I need a Z-origin sensor to test the sensor-based Z-origin setting, and decode the thickness settings — NYI.
+* Z0 sensor probing is available with `b` for User (RML-1), based on a captured real MDX-40A cycle. Sensor thickness editing and probing other coordinate systems remain unsupported. See [Z-probing](docs/z-probing.md).
 * The geometry of the mill means that without tooling, it is fairly difficult (but not impossible) to crash. The rotary axis makes this much easier as the firmware allow the collet to hit the vice area.
 * Be warned that bad, terrible things could happen driving your hardware with this experimental software, due to known or unknown bugs or defects, for which you entirely agree to take all risks in operating and hold the contributors blameless.
 

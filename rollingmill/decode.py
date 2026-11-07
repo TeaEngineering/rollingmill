@@ -56,6 +56,8 @@ BULK_WV = -1
 # Add entries here as new commands are discovered and RE'd.
 KNOWN_WVALUES: dict = {
     # ── Handshake / ping ─────────────────────────────────────────────────────
+    0x2001: 'z0_sensor_status',
+    0x3902: 'z0_probe',
     0x0001: 'ping',
     0x0002: 'machine_type',
     0x0003: 'trigger_response',
@@ -114,7 +116,7 @@ KNOWN_WVALUES: dict = {
 # SET commands that prime the device; the next GET 0x0003 is their response.
 # Tracked by parse_lines so decode_line can dispatch 0x0003 correctly.
 _PATTERN_B: frozenset = frozenset({
-    0x3804, 0x2405,
+    0x2001, 0x3804, 0x2405,
     0x3005, 0x3003, 0x3800, 0x3b01,
     0x3900,
     0x0101,

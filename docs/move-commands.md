@@ -86,3 +86,51 @@ the main panel.
 | `0x1109` | Operation bracket — payload `0x00` = begin, `0xFF` = end; must wrap all jog, move-to, and NC job sequences. |
 | `0x3808` | Move Y to centre of rotary A-axis. Payload `>HH` — mode (`2`), speed (`0xFFFF` = firmware max). Rotary-only entry of the Move dropdown. |
 | `0x0500` | Move to View Position. Payload `>H` — speed (`0xFFFF` = firmware max). Parks the machine in the front-of-bed view pose for workpiece load/unload. |
+
+## Rollingmill selected-coordinate origin moves
+
+The TUI's origin presets now resolve the selected slot's stored origin, read
+the current position, and send `0x04f7` in machine coordinates. Unselected axes
+retain their current position. This matches the selected coordinate display
+and avoids `0x3501`'s command-set-mode restrictions. MCS uses zero origin; a
+failed origin/position read cancels the move. View Position and rotation-center
+presets remain machine-defined locations. Numeric entry already adds the
+selected display offset to the entered coordinates.
+
+## Dialog and coordinate conversion update
+
+The Move-To preview/view preset is explicitly labeled MCS. Origin presets and
+User Specified numeric targets share `move_to_position`, which reads the
+selected coordinate origin and adds it to entered values. Blank numeric
+fields preserve the current machine-axis position. If a coordinate origin
+cannot be read, selection/movement fails visibly instead of substituting zero.
+The machine-defined rotation-center shortcut was removed from this picker;
+its machine API remains available separately.
+
+Cooperative overlays now use `noutrefresh` and one final `doupdate` per frame,
+so the background and dialog are presented together. Blocking numeric entry
+retains its independent refresh. PTY checks found no repeated dialog repaint
+output for Move-To, Coordinate Systems and Tool Diameter Offsets while idle.
+
+## Absolute move lifecycle correction
+
+The live session trace `20261004-211007.558.txt` recorded origin targets being
+sent successfully, immediately followed by `0x03f2` and `0x1109=FF`; sampled
+positions then remained unchanged. Static inspection of VPanel confirms that
+it begins interactive operations with `0x03f5=02` and `0x1109=00`, waits for
+motion completion after `0x04f7`, then unwinds with `0x03f2`, `0x03f5=FF` and
+`0x1109=FF`. Its absolute-move callers use numeric speeds 120/3000.
+
+Rollingmill now keeps an absolute move pending across poll ticks, uses direct
+status reads instead of idle heartbeat writes, and defers cleanup until the
+move ends. Completion requires the sampled target position (within 0.002 mm
+per axis); ended motion at a different position is unverified. Unacknowledged
+commands, cancellation and missing status produce a visible failure/status
+message. The preset 0xFFFF speed sentinel maps to 3000 mm/min for absolute
+moves. Competing TUI operations are blocked while the move is pending; Esc
+requests stop and polling continues until idle.
+
+This correction has mocked lifecycle and packet tests; it has not yet been
+confirmed by a new physical movement. The trace and static code establish the
+protocol mismatch, but hardware validation is still needed to confirm the
+cause of the observed no-motion symptom.
