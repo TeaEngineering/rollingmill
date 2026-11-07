@@ -70,6 +70,7 @@ The interactive TUI exposes the following keybindings:
 | <kbd>c</kbd> | coordinate systems (activate / move-to / overwrite) |
 | <kbd>m</kbd> | Move-To picker (presets + User Specify numeric entry) |
 | <kbd>t</kbd> | tool diameter offsets |
+| <kbd>b</kbd> | Z0 sensor probing (User/RML-1; Y confirms, Esc stops) |
 | <kbd>q</kbd> | quit |
 
 **Cut panel** (only when `--file` is given)
@@ -88,7 +89,6 @@ Gotchas/Notes using the mill
 * Single-stepping nc-code _partially works_, but the MDX complains about being starved of NC code and lights the View-LED when you reach a cutting operation.
 * The progress display during a cutting job is that of filling the machine buffer, rather than the actual block being executed, which usually runs a few blocks behind. It's a shame there are not two counters so that this could be made 100% accurate.
 * There might be an issue with storing A-axis values in workspace offsets and recalling them, as sometimes I get an extra +360° rotation on recall.
-* I need a Z-origin sensor to test the sensor-based Z-origin setting, and decode the thickness settings — NYI.
 * The geometry of the mill means that without tooling, it is fairly difficult (but not impossible) to crash. The rotary axis makes this much easier as the firmware allow the collet to hit the vice area.
 * Be warned that bad, terrible things could happen driving your hardware with this experimental software, due to known or unknown bugs or defects, for which you entirely agree to take all risks in operating and hold the contributors blameless.
 
