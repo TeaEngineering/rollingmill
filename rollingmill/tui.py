@@ -20,6 +20,7 @@ Keybindings:
   c          open coordinate systems dialog (activate / move-to / overwrite)
   m          open Move-To picker (presets + User Specify numeric entry)
   t          open tool diameter offsets dialog
+  b          Z0 sensor probing (Y confirms; Esc stops)
   q          quit
 
 Cut panel (visible when --file is given):
@@ -36,6 +37,8 @@ import curses
 import logging
 import time
 from typing import Optional, Tuple
+
+import usb.core
 import sys
 
 from . import machine as _machine
@@ -47,6 +50,7 @@ from .machine import (FLAG_VIEW_LED, FLAG_DOOR, FLAG_SPINDLE, FLAG_CMD_MOVE,
 from .check import lint_file
 from .trace import Tracer
 from .cutjob import CutJob
+from .probing import ZProbe
 
 # ── Jog parameters ────────────────────────────────────────────────────────────
 
@@ -136,6 +140,8 @@ class TUI:
         self._tool_data     : Optional[list] = None   # list[8] float|None
         self._tool_editing  = False
         self._tool_edit_buf = ''
+        self._probe = ZProbe(machine)
+        self._probe_confirm = False
 
     # ── Entry point ───────────────────────────────────────────────────────────
 
@@ -169,11 +175,12 @@ class TUI:
             # Ping handoff — drive machine polling from the main loop.
             now = time.monotonic()
             if now - self._last_poll >= _machine.POLL_INTERVAL:
-                self._m.poll()
+                fresh = self._probe.poll() if self._probe.active else self._m.poll()
+                self._probe.update(fresh)
                 self._last_poll = now
                 self._update_jog_indicator()
 
-            if self._cut_job:
+            if self._cut_job and not self._probe.active:
                 self._cut_job.service()
 
             self._draw(stdscr)
@@ -210,6 +217,21 @@ class TUI:
     # ── Input ─────────────────────────────────────────────────────────────────
 
     def _handle_key(self, key: int) -> None:
+        if self._probe.active:
+            if key in (27, ord('q'), ord('Q')):
+                self._probe.cancel()
+            return  # No jog, spindle, WCS edits or NC streaming during probing.
+        if self._probe_confirm:
+            if key in (27, ord('n'), ord('N'), ord('q'), ord('Q')):
+                self._probe_confirm = False
+            elif key in (ord('y'), ord('Y')):
+                self._probe_confirm = False
+                try:
+                    self._probe.start()
+                    self.annotate("KEY b  Z0 probe confirmed")
+                except (ValueError, usb.core.USBError) as exc:
+                    logging.getLogger(__name__).warning("Z-probe: %s", exc)
+            return
         # Modal dialogs swallow all keys while open
         if self._wcs_open:
             self._wcs_handle_key(key)
@@ -303,6 +325,11 @@ class TUI:
             self._move_open_dialog()
         elif key in (ord('t'), ord('T')):
             self._tool_open_dialog()
+        elif key in (ord('b'), ord('B')):
+            if self._cut_job or self._jog_armed or self._drill_active:
+                logging.getLogger(__name__).warning("Close the NC job and stop jogging/drilling before Z-probing")
+            else:
+                self._probe_confirm = True
         elif key in (ord('p'), ord('P')):
             self._m.fetch_axis_snapshot()
 
@@ -442,6 +469,8 @@ class TUI:
             log_h   = rows - log_row
 
         self._draw_log(stdscr, log_row, log_h, cols)
+        if self._probe.message:
+            self._put(stdscr, max(0, log_row - 1), 0, self._probe.message)
 
         try:
             stdscr.refresh()
@@ -456,6 +485,28 @@ class TUI:
 
         if self._move_open:
             self._draw_move_dialog(stdscr, rows, cols)
+
+        if self._probe_confirm:
+            self._draw_probe_dialog(stdscr, rows, cols)
+
+    def _draw_probe_dialog(self, stdscr, rows, cols):
+        lines = [
+            "Set User (RML-1) Z origin using Z0 sensor",
+            "Connect and clean the sensor; place it on the workpiece.",
+            "Position the tool directly above it; close the cover.",
+            "Firmware uses its existing sensor thickness/settings.",
+            "Y starts descent and retract; Esc cancels this dialog.",
+        ]
+        if rows < 10 or cols < 30:
+            self._put(stdscr, 0, 0, "Z-probe: enlarge terminal; Esc cancels")
+            stdscr.refresh()
+            return
+        width = min(cols - 2, 70)
+        win = curses.newwin(8, width, (rows - 8) // 2, (cols - width) // 2)
+        win.box()
+        for i, line in enumerate(lines, 1):
+            self._put(win, i, 2, line[:width - 4])
+        win.refresh()
 
     def _draw_state(self, win: curses.window, height: int, cols: int) -> None:
         s     = self._m.state
@@ -560,7 +611,7 @@ class TUI:
         if ref_row > row + 1:
             key_lines = [
                 '  jog: ←→ X   ↑↓ Y   a/z Z   [] A    f speed (vslow/slow/medium/fast)   1-5 step',
-                '  s spindle   <> RPM   d A-drill   -/+ override%   c coords   m move-to   t tools   q quit',
+                '  s spindle   <> RPM   d A-drill   -/+ override%   c coords   m move-to   t tools   b Z-probe   q quit',
             ]
             for i, line in enumerate(key_lines):
                 r = ref_row + i
@@ -1186,7 +1237,10 @@ def main(argv=None) -> int:
         tui = TUI(m, log_buf, t)
         if args.file:
             tui.load_nc_file(args.file)
-        curses.wrapper(tui.run)
+        try:
+            curses.wrapper(tui.run)
+        finally:
+            tui._probe.close()
 
 
 if __name__ == '__main__':

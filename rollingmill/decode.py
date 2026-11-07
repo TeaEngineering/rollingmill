@@ -79,6 +79,9 @@ KNOWN_WVALUES: dict = {
     0x3809: 'rotatary_drill',         # SET 2×uint16 [1,0xFFFF]=start / [0,0]=stop (A-axis, Drill Workpiece dialog)
     0x3900: 'spindle_rpm_read',       # Pattern B; GET 0x0003 → 1×uint32 RPM
     0x3901: 'spindle_rpm_write',      # SET 1×uint32 RPM; waits ping bit21
+    # ── Z0 probing ───────────────────────────────────────────────────────────
+    0x2001: 'z0_sensor_status',
+    0x3902: 'z0_probe',
     # ── Operation bracket ────────────────────────────────────────────────────
     0x1109: 'op_bracket',             # SET 1 byte: 0x00=begin, 0xff=end
     # ── Coordinate system selection ──────────────────────────────────────────
@@ -114,7 +117,7 @@ KNOWN_WVALUES: dict = {
 # SET commands that prime the device; the next GET 0x0003 is their response.
 # Tracked by parse_lines so decode_line can dispatch 0x0003 correctly.
 _PATTERN_B: frozenset = frozenset({
-    0x3804, 0x2405,
+    0x2001, 0x3804, 0x2405,
     0x3005, 0x3003, 0x3800, 0x3b01,
     0x3900,
     0x0101,
