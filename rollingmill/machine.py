@@ -32,6 +32,11 @@ JOG_SPEED_MAX = 0xFFFF  # firmware maximum
 SPINDLE_RPM_MIN =  4500
 SPINDLE_RPM_MAX = 15000
 
+# Limits VPanel's Setup dialog applies to the Z0 sensor thickness (mm). The firmware's
+# own limits are unknown, so the setter holds to the same range.
+Z0_THICKNESS_MIN_MM = 14.0
+Z0_THICKNESS_MAX_MM = 16.0
+
 # WCS slot display labels (index = slot number passed to set_active_wcs /
 # get_wcs_origin / write_wcs_origin / partial_update_wcs_origin).
 # Slot 0 is the machine coordinate system; 1 = RML-1 user origin; 2 = EXOFS;
@@ -518,8 +523,49 @@ class MDX40A:
 
     @property
     def z0_sensor_thickness_mm(self) -> Optional[float]:
-        """Z0 sensor thickness in mm as read at connect time, or None if unread."""
+        """Z0 sensor thickness in mm as last read or set, or None if unread."""
         return self._z0_thickness_mm
+
+    def set_z0_sensor_thickness_mm(self, thickness_mm: float) -> bool:
+        """Write the Z0 sensor thickness to the firmware, then read it back.
+
+        SET 0x3901, one big-endian uint32 in 1/1000 mm, inside the 0x1109 operation
+        bracket and followed by the ping bit 21 ack wait, as the Setup dialog's OK
+        handler does (write_ncode_settings → MdxAction_x3901_p1). The 0x3902 Z0
+        sensor cycle uses this stored value, so a wrong value shifts the Z origin
+        it sets by the same amount.
+
+        Raises ValueError outside Z0_THICKNESS_MIN_MM..Z0_THICKNESS_MAX_MM (the
+        Setup dialog's range). Returns True only if the write was acked and the
+        value read back matches; the cached `z0_sensor_thickness_mm` is refreshed
+        from the read-back either way.
+        """
+        if not Z0_THICKNESS_MIN_MM <= thickness_mm <= Z0_THICKNESS_MAX_MM:
+            raise ValueError(
+                f"Z0 sensor thickness must be {Z0_THICKNESS_MIN_MM:.3f}–"
+                f"{Z0_THICKNESS_MAX_MM:.3f} mm, got {thickness_mm:.3f}"
+            )
+        raw = round(thickness_mm * 1000)
+        try:
+            self._link.vend_set(0x1109, b'\x00')
+            try:
+                self._link.vend_set(0x3901, struct.pack('>I', raw))
+                log.info("Z0 sensor thickness → %.3f mm (raw %d)", raw / 1000.0, raw)
+                acked = self._wait_ping_bit21()
+            finally:
+                self._link.vend_set(0x1109, b'\xff')
+        except usb.core.USBError as e:
+            log.warning("set_z0_sensor_thickness_mm failed: %s", e)
+            return False
+        readback = self.get_z0_sensor_thickness_mm()
+        if readback is not None:
+            self._z0_thickness_mm = readback
+        if not acked:
+            return False
+        if readback is None or abs(readback * 1000 - raw) > 0.5:
+            log.warning("Z0 sensor thickness read-back %s does not match %.3f mm", readback, raw / 1000.0)
+            return False
+        return True
 
     def set_target_rpm(self, rpm: int) -> int:
         """Update the cached spindle target RPM only — does not touch the device.

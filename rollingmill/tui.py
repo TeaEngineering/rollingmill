@@ -20,7 +20,7 @@ Keybindings:
   c          open coordinate systems dialog (activate / move-to / overwrite)
   m          open Move-To picker (presets + User Specify numeric entry)
   t          open tool diameter offsets dialog
-  b          Z0 sensor probing (Y confirms; Esc stops)
+  b          Z0 sensor probe dialog (H sets thickness, Enter starts; Esc stops)
   q          quit
 
 Cut panel (visible when --file is given):
@@ -142,6 +142,9 @@ class TUI:
         self._tool_edit_buf = ''
         self._probe = ZProbe(machine)
         self._probe_confirm = False
+        self._probe_buf     = ''      # Z0 thickness edit buffer (mm)
+        self._probe_dirty   = False   # buffer edited but not yet sent with H
+        self._probe_notice  = ''      # last result shown in the dialog
 
     # ── Entry point ───────────────────────────────────────────────────────────
 
@@ -222,15 +225,7 @@ class TUI:
                 self._probe.cancel()
             return  # No jog, spindle, WCS edits or NC streaming during probing.
         if self._probe_confirm:
-            if key in (27, ord('n'), ord('N'), ord('q'), ord('Q')):
-                self._probe_confirm = False
-            elif key in (ord('y'), ord('Y')):
-                self._probe_confirm = False
-                try:
-                    self._probe.start()
-                    self.annotate("KEY b  Z0 probe confirmed")
-                except (ValueError, usb.core.USBError) as exc:
-                    logging.getLogger(__name__).warning("Z-probe: %s", exc)
+            self._probe_dialog_key(key)
             return
         # Modal dialogs swallow all keys while open
         if self._wcs_open:
@@ -329,9 +324,62 @@ class TUI:
             if self._cut_job or self._jog_armed or self._drill_active:
                 logging.getLogger(__name__).warning("Close the NC job and stop jogging/drilling before Z-probing")
             else:
-                self._probe_confirm = True
+                self._probe_open_dialog()
         elif key in (ord('p'), ord('P')):
             self._m.fetch_axis_snapshot()
+
+    # ── Z0 sensor probe dialog ('b' key) ──────────────────────────────────────
+
+    def _probe_open_dialog(self) -> None:
+        thickness = self._m.z0_sensor_thickness_mm
+        self._probe_buf    = f'{thickness:.3f}' if thickness is not None else ''
+        self._probe_dirty  = False
+        self._probe_notice = ''
+        self._probe_confirm = True
+
+    def _probe_dialog_key(self, key: int) -> None:
+        if key in (27, ord('q'), ord('Q')):
+            self._probe_confirm = False
+        elif key in (10, 13):                           # Enter — start the probe cycle
+            if self._probe_dirty:
+                self._probe_notice = 'Thickness edited: press H to set it first'
+                return
+            self._probe_confirm = False
+            try:
+                self._probe.start()
+                self.annotate("KEY b  Z0 probe confirmed")
+            except (ValueError, usb.core.USBError) as exc:
+                logging.getLogger(__name__).warning("Z-probe: %s", exc)
+        elif key in (ord('h'), ord('H')):               # H — write the thickness
+            self._probe_set_thickness()
+        elif key in (127, curses.KEY_BACKSPACE, 8):
+            self._probe_buf = self._probe_buf[:-1]
+            self._probe_dirty = True
+            self._probe_notice = ''
+        elif 32 <= key < 128 and chr(key) in '0123456789.':
+            if not self._probe_dirty:
+                self._probe_buf = ''                    # first keystroke replaces the value
+            if len(self._probe_buf) < 8:
+                self._probe_buf += chr(key)
+            self._probe_dirty = True
+            self._probe_notice = ''
+
+    def _probe_set_thickness(self) -> None:
+        try:
+            value = float(self._probe_buf)
+            ok = self._m.set_z0_sensor_thickness_mm(value)
+        except ValueError as exc:
+            self._probe_notice = str(exc) if self._probe_buf else 'Enter a thickness in mm first'
+            return
+        self.annotate(f"KEY h  Z0 sensor thickness {value:.3f} mm ok={ok}")
+        stored = self._m.z0_sensor_thickness_mm
+        if stored is not None:
+            self._probe_buf = f'{stored:.3f}'
+        if ok:
+            self._probe_dirty = False
+            self._probe_notice = f'Set: Z0 sensor thickness is {stored:.3f} mm'
+        else:
+            self._probe_notice = 'Set failed: machine did not accept or confirm the value'
 
     def annotate(self, msg: str) -> None:
         """Write a `# <msg>` marker to the trace, if a tracer was attached.
@@ -489,23 +537,49 @@ class TUI:
         if self._probe_confirm:
             self._draw_probe_dialog(stdscr, rows, cols)
 
-    def _draw_probe_dialog(self, stdscr, rows, cols):
-        lines = [
-            "Set User (RML-1) Z origin using Z0 sensor",
-            "Connect and clean the sensor; place it on the workpiece.",
-            "Position the tool directly above it; close the cover.",
-            "Firmware uses its existing sensor thickness/settings.",
-            "Y starts descent and retract; Esc cancels this dialog.",
-        ]
-        if rows < 10 or cols < 30:
+    def _draw_probe_dialog(self, stdscr: curses.window, rows: int, cols: int) -> None:
+        CP   = curses.color_pair
+        BOLD = curses.A_BOLD
+
+        dh = 12
+        dw = min(66, cols - 2)
+        if rows < dh + 2 or dw < 40:
             self._put(stdscr, 0, 0, "Z-probe: enlarge terminal; Esc cancels")
             stdscr.refresh()
             return
-        width = min(cols - 2, 70)
-        win = curses.newwin(8, width, (rows - 8) // 2, (cols - width) // 2)
+        try:
+            win = curses.newwin(dh, dw, (rows - dh) // 2, (cols - dw) // 2)
+        except curses.error:
+            return
+
+        win.erase()
         win.box()
-        for i, line in enumerate(lines, 1):
-            self._put(win, i, 2, line[:width - 4])
+        self._put(win, 0, 2, ' Z0 Sensor Probe', CP(_CP_HEADER) | BOLD)
+
+        lines = [
+            'Set the User (RML-1) Z origin using the Z0 sensor.',
+            'Clean and connect the sensor and place it on the workpiece.',
+            'Position the tool directly above it and close the cover.',
+        ]
+        for i, line in enumerate(lines):
+            self._put(win, 1 + i, 2, line[:dw - 4], CP(_CP_LABEL))
+
+        stored = self._m.z0_sensor_thickness_mm
+        stored_str = f'{stored:.3f} mm' if stored is not None else '?'
+        field = (self._probe_buf + '_') if self._probe_dirty else (self._probe_buf or '?')
+        attr = (CP(_CP_ACTIVE) | BOLD) if self._probe_dirty else (CP(_CP_VALUE) | BOLD)
+        self._put(win, 5, 2, 'Thickness of Z0 sensor:', CP(_CP_LABEL))
+        self._put(win, 5, 26, f' {field:<9s}', attr)
+        self._put(win, 5, 37, 'mm', CP(_CP_LABEL))
+        self._put(win, 6, 2, f'in machine: {stored_str}   (limits {_machine.Z0_THICKNESS_MIN_MM:.0f}'
+                             f'–{_machine.Z0_THICKNESS_MAX_MM:.0f} mm)'[:dw - 4], CP(_CP_DIM))
+        if self._probe_notice:
+            self._put(win, 8, 2, self._probe_notice[:dw - 4], CP(_CP_LOG_WARN) | BOLD)
+
+        keys = ' Enter start probe   H set thickness   0-9 . edit   Esc cancel'
+        self._put(win, dh - 3, 1, '─' * (dw - 2), CP(_CP_LABEL))
+        self._put(win, dh - 2, 1, keys[:dw - 2], CP(_CP_KEYS))
+
         win.refresh()
 
     def _draw_state(self, win: curses.window, height: int, cols: int) -> None:

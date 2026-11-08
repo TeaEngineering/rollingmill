@@ -42,3 +42,103 @@ def test_decode_labels_read_and_write_as_thickness():
     write = decode.decode_line("t", '>', 0x3901, struct.pack('>I', 14500))
     assert "Z0_SENSOR_THICKNESS_WRITE" in write and "14.500 mm" in write
     assert "RPM" not in read + write
+
+
+# ── setter and the 'b' dialog ────────────────────────────────────────────────
+
+class _Recording(MdxMockUSB):
+    """Mock whose GET 0x3900 follows SET 0x3901, like the firmware."""
+
+    def __init__(self, thickness_um=14140, accept=True):
+        super().__init__(responses={0x3900: struct.pack('>I', thickness_um)})
+        self.sent = []
+        self.accept = accept
+
+    def vend_set(self, wValue, data=b""):
+        self.sent.append((wValue, data))
+        if wValue == 0x3901 and self.accept:
+            self._responses[0x3900] = data
+        super().vend_set(wValue, data)
+
+
+def test_set_writes_bracketed_uint32_and_verifies_readback():
+    link = _Recording()
+    m = MDX40A(link)
+    link.sent.clear()
+    assert m.set_z0_sensor_thickness_mm(15.03) is True
+    assert link.sent == [(0x1109, b'\x00'), (0x3901, struct.pack('>I', 15030)), (0x1109, b'\xff'),
+                         (0x3900, b'')]
+    assert m.z0_sensor_thickness_mm == pytest.approx(15.03)
+
+
+@pytest.mark.parametrize("bad", [13.999, 16.001, 0.0, -1.0, 150.0])
+def test_set_rejects_values_outside_vpanel_range_without_writing(bad):
+    link = _Recording()
+    m = MDX40A(link)
+    link.sent.clear()
+    with pytest.raises(ValueError):
+        m.set_z0_sensor_thickness_mm(bad)
+    assert link.sent == []
+
+
+def test_set_reports_failure_when_readback_differs():
+    link = _Recording(accept=False)
+    m = MDX40A(link)
+    assert m.set_z0_sensor_thickness_mm(15.03) is False
+    assert m.z0_sensor_thickness_mm == pytest.approx(14.14)  # cache shows what the machine holds
+
+
+def _type(tui, text):
+    for ch in text:
+        tui._handle_key(ord(ch))
+
+
+def test_dialog_shows_stored_value_and_h_sets_it():
+    from rollingmill.tui import TUI, _LogBuffer
+    link = _Recording()
+    m = MDX40A(link)
+    tui = TUI(m, _LogBuffer())
+    tui._handle_key(ord('b'))
+    assert tui._probe_confirm and tui._probe_buf == '14.140' and not tui._probe_dirty
+    link.sent.clear()
+    _type(tui, '15.03')
+    assert tui._probe_buf == '15.03' and tui._probe_dirty
+    assert link.sent == []                       # typing alone writes nothing
+    tui._handle_key(ord('h'))
+    assert (0x3901, struct.pack('>I', 15030)) in link.sent
+    assert not tui._probe_dirty and tui._probe_buf == '15.030'
+    assert tui._probe_confirm                    # dialog stays open after H
+
+
+def test_enter_is_refused_until_edited_value_is_set():
+    from rollingmill.tui import TUI, _LogBuffer
+    link = _Recording()
+    tui = TUI(MDX40A(link), _LogBuffer())
+    tui._handle_key(ord('b'))
+    _type(tui, '15.03')
+    link.sent.clear()
+    tui._handle_key(10)
+    assert tui._probe_confirm and not tui._probe.active
+    assert "H" in tui._probe_notice and link.sent == []
+
+
+def test_out_of_range_h_keeps_dialog_and_writes_nothing():
+    from rollingmill.tui import TUI, _LogBuffer
+    link = _Recording()
+    tui = TUI(MDX40A(link), _LogBuffer())
+    tui._handle_key(ord('b'))
+    _type(tui, '20')
+    link.sent.clear()
+    tui._handle_key(ord('h'))
+    assert link.sent == [] and tui._probe_dirty and "14.000" in tui._probe_notice
+
+
+def test_esc_closes_without_writing():
+    from rollingmill.tui import TUI, _LogBuffer
+    link = _Recording()
+    tui = TUI(MDX40A(link), _LogBuffer())
+    tui._handle_key(ord('b'))
+    _type(tui, '15')
+    link.sent.clear()
+    tui._handle_key(27)
+    assert not tui._probe_confirm and link.sent == []
