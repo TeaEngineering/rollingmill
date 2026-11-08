@@ -4,6 +4,8 @@ Decoded from VP_MDX40A.exe: byte 1 is the command set, bytes 2-4 are the radio g
 the "NC Code setting" page (decimal method, tool-diameter offset type, optional block),
 bytes 0 and 5 are only round-tripped. See machine.MachineConfig.
 """
+import logging
+
 import pytest
 import usb.core
 
@@ -120,3 +122,43 @@ def test_with_changes_leaves_other_bytes_alone():
     cfg = MachineConfig(bytes([7, 1, 2, 1, 0, 9]))
     assert cfg.with_changes(optional_block=1).raw == bytes([7, 1, 2, 1, 1, 9])
     assert cfg.with_changes().raw == cfg.raw
+
+
+# ── labels and the startup banner ────────────────────────────────────────────
+
+def test_offset_type_is_labelled_type_a_and_type_b():
+    assert M.OFFSET_TYPE_LABELS == {M.OFFSET_TYPE_A: "Type A", M.OFFSET_TYPE_B: "Type B"}
+
+
+def test_summary_names_every_field_and_shows_the_raw_bytes():
+    cfg = MachineConfig(bytes([0, 1, 2, 1, 1, 5]))
+    assert cfg.summary() == ("command set NC Code, tool-dia offset paths Type B, "
+                             "decimal point Calculator Method [F], optional block Disabled "
+                             "[00 01 02 01 01 05]")
+
+
+def test_summary_survives_values_the_dialog_does_not_know():
+    text = MachineConfig(bytes([0, 9, 7, 3, 5, 255])).summary()
+    assert "command set unknown (9)" in text and "decimal point unknown (7)" in text
+    assert "[00 09 07 03 05 ff]" in text
+
+
+def test_startup_banner_prints_the_whole_config(caplog):
+    with caplog.at_level(logging.INFO, logger="rollingmill.machine"):
+        MDX40A(_Config(bytes([0, 2, 1, 0, 0, 5])))
+    banner = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Machine config:")]
+    assert banner == ["Machine config: command set Selected automatically (RML-1/NC Code), "
+                      "tool-dia offset paths Type A, decimal point Calculator Method [All], "
+                      "optional block Enabled [00 02 01 00 00 05]"]
+
+
+def test_startup_banner_when_the_config_cannot_be_read(caplog):
+    class _Failing(_Config):
+        def vend_get(self, wValue, length):
+            if wValue == 0x0001:
+                raise usb.core.USBError("boom")
+            return super().vend_get(wValue, length)
+
+    with caplog.at_level(logging.INFO, logger="rollingmill.machine"):
+        MDX40A(_Failing())
+    assert any(r.getMessage() == "Machine config read failed" for r in caplog.records)

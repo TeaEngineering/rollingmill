@@ -60,7 +60,7 @@ OPTIONAL_BLOCK_DISABLED = 1
 
 CMDSET_LABELS = {CMDSET_RML1: "RML-1", CMDSET_NC: "NC Code",
                  CMDSET_AUTO: "Selected automatically (RML-1/NC Code)"}
-OFFSET_TYPE_LABELS = {OFFSET_TYPE_A: "A", OFFSET_TYPE_B: "B"}
+OFFSET_TYPE_LABELS = {OFFSET_TYPE_A: "Type A", OFFSET_TYPE_B: "Type B"}
 DECIMAL_LABELS = {DECIMAL_CONVENTIONAL: "Conventional Method",
                   DECIMAL_CALC_ALL: "Calculator Method [All]",
                   DECIMAL_CALC_F: "Calculator Method [F]",
@@ -88,6 +88,16 @@ class MachineConfig:
     @property
     def optional_block(self) -> int:
         return self.raw[4]
+
+    def summary(self) -> str:
+        """One line with every decoded field and the raw bytes, for the startup banner."""
+        def label(labels, value):
+            return labels.get(value, f"unknown ({value})")
+        return (f"command set {label(CMDSET_LABELS, self.command_set)}, "
+                f"tool-dia offset paths {label(OFFSET_TYPE_LABELS, self.offset_type)}, "
+                f"decimal point {label(DECIMAL_LABELS, self.decimal_method)}, "
+                f"optional block {label(OPTIONAL_BLOCK_LABELS, self.optional_block)} "
+                f"[{self.raw.hex(' ')}]")
 
     def with_changes(self, command_set: Optional[int] = None, offset_type: Optional[int] = None,
                      decimal_method: Optional[int] = None,
@@ -1430,10 +1440,11 @@ class MDX40A:
         self.get_rotary_axis_angle_correction()
 
         # Read the machine-config struct (GET 0x3106): command set + NC Code preferences.
-        if self.read_config() is not None:
-            log.info("Command set: %s", CMDSET_LABELS.get(self.command_set, f"unknown ({self.command_set})"))
+        cfg = self.read_config()
+        if cfg is not None:
+            log.info("Machine config: %s", cfg.summary())
         else:
-            log.info("Command set read failed")
+            log.info("Machine config read failed")
 
         # Read configured Z0 sensor thickness (GET 0x3900, Pattern B).
         self._z0_thickness_mm = self.get_z0_sensor_thickness_mm()

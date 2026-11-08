@@ -163,7 +163,7 @@ only enables the NC Code page for the NC Code and automatic command sets.
 | 0 | status | not edited; round-tripped |
 | 1 | command set (radios `0xFD3`–`0xFD5`) | `0` RML-1, `1` NC Code, `2` selected automatically |
 | 2 | values with decimal point (radios `0xFB8`–`0xFBB`) | `0` Conventional Method, `1` Calculator Method [All], `2` Calculator Method [F], `3` Calculator Method [IJKRXYZA] |
-| 3 | tool-diameter offset type (radios `0xFB5`, `0xFB6`) | `0` = A, `1` = B |
+| 3 | tool-diameter offset type (radios `0xFB5`, `0xFB6`); shown by rollingmill as "Tool-dia offset paths" | `0` = Type A, `1` = Type B |
 | 4 | optional block (radios `0xFBD`, `0xFBE`) | `0` Enabled, `1` Disabled |
 | 5 | unknown | not edited; round-tripped |
 

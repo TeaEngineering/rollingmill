@@ -94,10 +94,11 @@ _CP_DIM      = 13   # dimmed / unavailable
 # VPanel (its "NC Code setting..." button is enabled for modes 1 and 2).
 _CMD_GROUPS = [
     ('command_set',    'Command set',   list(_machine.CMDSET_LABELS.items()),         False),
-    ('offset_type',    'Offset type',   list(_machine.OFFSET_TYPE_LABELS.items()),    True),
+    ('offset_type',    'Tool-dia offset paths', list(_machine.OFFSET_TYPE_LABELS.items()), True),
     ('decimal_method', 'Decimal point', list(_machine.DECIMAL_LABELS.items()),        True),
     ('optional_block', 'Optional block', list(_machine.OPTIONAL_BLOCK_LABELS.items()), True),
 ]
+_CMD_OPT_COL = 26   # option column: after the longest group label plus the ' *' pending mark
 _CMD_ROWS = [(key, value, label, nc_only)
              for key, _group, options, nc_only in _CMD_GROUPS for value, label in options]
 
@@ -445,8 +446,8 @@ class TUI:
         BOLD = curses.A_BOLD
 
         dh = 17
-        dw = min(66, cols - 2)
-        if rows < dh + 2 or dw < 62:
+        dw = min(70, cols - 2)
+        if rows < dh + 2 or dw < 70:
             self._put(stdscr, 0, 0, "Command mode: enlarge terminal; Esc cancels")
             stdscr.refresh()
             return
@@ -477,7 +478,8 @@ class TUI:
                 attr = CP(_CP_DIM)
             else:
                 attr = CP(_CP_VALUE) | (BOLD if chosen else 0)
-            self._put(win, r, 18, f"{'(•)' if chosen else '( )'} {label}".ljust(dw - 19)[:dw - 19], attr)
+            width = dw - _CMD_OPT_COL - 1
+            self._put(win, r, _CMD_OPT_COL, f"{'(•)' if chosen else '( )'} {label}".ljust(width)[:width], attr)
             r += 1
 
         info = ('Stored in the machine; kept across power cycles.' if nc_prefs_enabled
