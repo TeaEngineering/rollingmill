@@ -138,7 +138,7 @@ def test_tui_confirmation_and_motion_interlocks():
     tui._handle_key(27)
     assert not tui._probe_confirm
     tui._handle_key(ord('b'))
-    tui._handle_key(ord('y'))
+    tui._handle_key(10)
     assert tui._probe.active
     n = len(link.sent)
     for key in ('z', 's', 'c', 'r', 'b'):
