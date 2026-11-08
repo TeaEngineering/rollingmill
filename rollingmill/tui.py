@@ -52,6 +52,8 @@ from .trace import Tracer
 from .cutjob import CutJob
 from .probing import PROBE_SLOTS, ZProbe
 
+log = logging.getLogger('rollingmill.tui')
+
 # ── Jog parameters ────────────────────────────────────────────────────────────
 
 STEPS_LINEAR = [0.01, 0.1, 1.0, 10.0, 50.0]   # XYZ jog distances (mm)
@@ -323,9 +325,9 @@ class TUI:
             self._tool_open_dialog()
         elif key in (ord('b'), ord('B')):
             if self._cut_job or self._jog_armed or self._drill_active:
-                logging.getLogger(__name__).warning("Close the NC job and stop jogging/drilling before Z-probing")
+                log.warning("Close the NC job and stop jogging/drilling before Z-probing")
             elif self._m.active_wcs not in PROBE_SLOTS:
-                logging.getLogger(__name__).warning(
+                log.warning(
                     "Z-probe: select User, EXOFS or G54-G59 coords with c first (active: %s)",
                     _machine.wcs_label(self._m.active_wcs))
             else:
@@ -355,7 +357,7 @@ class TUI:
                 self._probe.start()
                 self.annotate("KEY b  Z0 probe confirmed")
             except (ValueError, usb.core.USBError) as exc:
-                logging.getLogger(__name__).warning("Z-probe: %s", exc)
+                log.warning("Z-probe: %s", exc)
         elif key in (ord('h'), ord('H')):               # H — write the thickness
             self._probe_set_thickness()
         elif key in (127, curses.KEY_BACKSPACE, 8):
@@ -432,7 +434,7 @@ class TUI:
         try:
             self._m.send_jog(axis, dist, speed=speed)
         except Exception as exc:
-            logging.getLogger('tui').error("Jog %s %+.3f mm failed: %s", axis, dist, exc)
+            log.error("Jog %s %+.3f mm failed: %s", axis, dist, exc)
             return
         self._moving     = axis
         self._jog_armed  = True
@@ -1026,7 +1028,7 @@ class TUI:
                 try:
                     action()
                 except Exception as exc:
-                    logging.getLogger('tui').error("Move target %r failed: %s", label, exc)
+                    log.error("Move target %r failed: %s", label, exc)
 
     def _draw_move_dialog(self, stdscr: curses.window, rows: int, cols: int) -> None:
         CP   = curses.color_pair
