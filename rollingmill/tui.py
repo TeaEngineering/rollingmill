@@ -591,7 +591,11 @@ class TUI:
             secs = self._m.spindle_secs
             if secs is not None:
                 h, m = secs // 3600, (secs % 3600) // 60
-                self._put(win, row, 73, f'runtime {h}h {m:02d}m', CP(_CP_LABEL))
+                runtime = f'runtime {h}h {m:02d}m'
+                self._put(win, row, 73, runtime, CP(_CP_LABEL))
+                zt = self._m.z0_sensor_thickness_mm
+                zt_str = f'{zt:.3f}' if zt is not None else '?'
+                self._put(win, row, 73 + len(runtime) + 2, f'Z0 sensor {zt_str} mm', CP(_CP_LABEL))
 
         # Row: rotary axis centreline origin (only shown when rotary is installed)
         rotary_byte = self._m.rotary_extension_byte

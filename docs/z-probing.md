@@ -14,7 +14,9 @@ Quit during an active cycle requests stop; quit again after idle to exit.
 
 Only mode 1 (User/RML-1) has live-capture evidence. Other WCS selections are
 rejected. This feature uses the firmware's existing sensor thickness/settings;
-it does not write a guessed thickness. There is no NC streaming during probing;
+it does not write a guessed thickness. The configured value (GET 0x3900, the
+Setup dialog's "Thickness of Z0 Sensor", 1/1000 mm) is read at connect and shown in the
+TUI state pane to the right of the spindle runtime; check it matches your sensor before probing. There is no NC streaming during probing;
 launch without `--file`. The fresh state must be idle, with cover closed and no
 error or spindle-on flag.
 
