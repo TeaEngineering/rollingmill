@@ -148,7 +148,7 @@ plus the enable-check `0 < value < 3` at `FUN_00402af0`):
 
 Called from `write_ncode_settings` @ `0x00402a20` when the Setup-tab NC/RML selection changes.
 
-Mirrored in `mdx40a/machine.py` as the constants `MDX40A.CMDSET_RML1`,
+Mirrored in `rollingmill/machine.py` as the module constants `CMDSET_RML1`,
 `CMDSET_NC`, `CMDSET_AUTO`.
 
 ### Symptom of the wrong mode

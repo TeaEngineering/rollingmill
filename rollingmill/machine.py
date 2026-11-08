@@ -37,6 +37,75 @@ SPINDLE_RPM_MAX = 15000
 Z0_THICKNESS_MIN_MM = 14.0
 Z0_THICKNESS_MAX_MM = 16.0
 
+# ── Machine config struct (GET 0x3106 / SET 0x3107, 6 bytes) ─────────────────
+# RE (VPanel Setup dialog): byte 1 is the command set (radio group 0xFD3-0xFD5 of the
+# "Modeling Machine" page); bytes 2-4 are the three radio groups of the "NC Code setting"
+# page (dialog 4020, groups 0xFB5 / 0xFB8 / 0xFBD): FUN_00404ff0 loads page fields from
+# bytes 3, 2, 4 and FUN_00405040 stores them back. Each byte is the MFC radio index.
+# Bytes 0 and 5 are never edited by VPanel, only round-tripped.
+CMDSET_RML1 = 0   # "RML-1"
+CMDSET_NC   = 1   # "NC Code"
+CMDSET_AUTO = 2   # "Selected automatically (RML-1/NC Code)" — sniffs the first byte
+
+OFFSET_TYPE_A = 0
+OFFSET_TYPE_B = 1
+
+DECIMAL_CONVENTIONAL = 0   # no decimal point = 1/1000 mm; with one = mm
+DECIMAL_CALC_ALL     = 1   # "Calculator Method [All]": always mm
+DECIMAL_CALC_F       = 2   # "Calculator Method [F]"
+DECIMAL_CALC_IJKRXYZA = 3  # "Calculator Method [IJKRXYZA]"
+
+OPTIONAL_BLOCK_ENABLED  = 0
+OPTIONAL_BLOCK_DISABLED = 1
+
+CMDSET_LABELS = {CMDSET_RML1: "RML-1", CMDSET_NC: "NC Code",
+                 CMDSET_AUTO: "Selected automatically (RML-1/NC Code)"}
+OFFSET_TYPE_LABELS = {OFFSET_TYPE_A: "A", OFFSET_TYPE_B: "B"}
+DECIMAL_LABELS = {DECIMAL_CONVENTIONAL: "Conventional Method",
+                  DECIMAL_CALC_ALL: "Calculator Method [All]",
+                  DECIMAL_CALC_F: "Calculator Method [F]",
+                  DECIMAL_CALC_IJKRXYZA: "Calculator Method [IJKRXYZA]"}
+OPTIONAL_BLOCK_LABELS = {OPTIONAL_BLOCK_ENABLED: "Enabled", OPTIONAL_BLOCK_DISABLED: "Disabled"}
+
+
+@dataclass(frozen=True)
+class MachineConfig:
+    """The 6-byte machine-config struct. `raw` keeps the bytes VPanel never edits."""
+    raw: bytes
+
+    @property
+    def command_set(self) -> int:
+        return self.raw[1]
+
+    @property
+    def decimal_method(self) -> int:
+        return self.raw[2]
+
+    @property
+    def offset_type(self) -> int:
+        return self.raw[3]
+
+    @property
+    def optional_block(self) -> int:
+        return self.raw[4]
+
+    def with_changes(self, command_set: Optional[int] = None, offset_type: Optional[int] = None,
+                     decimal_method: Optional[int] = None,
+                     optional_block: Optional[int] = None) -> "MachineConfig":
+        """Return a copy with the given fields replaced; raises ValueError on bad values."""
+        for name, value, labels in (("command_set", command_set, CMDSET_LABELS),
+                                    ("offset_type", offset_type, OFFSET_TYPE_LABELS),
+                                    ("decimal_method", decimal_method, DECIMAL_LABELS),
+                                    ("optional_block", optional_block, OPTIONAL_BLOCK_LABELS)):
+            if value is not None and value not in labels:
+                raise ValueError(f"{name} must be one of {sorted(labels)}; got {value}")
+        raw = bytearray(self.raw)
+        for index, value in ((1, command_set), (2, decimal_method), (3, offset_type), (4, optional_block)):
+            if value is not None:
+                raw[index] = value
+        return MachineConfig(bytes(raw))
+
+
 # WCS slot display labels (index = slot number passed to set_active_wcs /
 # get_wcs_origin / write_wcs_origin / partial_update_wcs_origin).
 # Slot 0 is the machine coordinate system; 1 = RML-1 user origin; 2 = EXOFS;
@@ -220,6 +289,7 @@ class MDX40A:
         self._spindle_live_speed: Optional[int] = None       # latest GET 0x3003 uint32 — current spindle/feed speed
         self._spindle_target_rpm: int = SPINDLE_RPM_MIN  # host-side target RPM; pushed to the mill with SET 0x3006
         self._z0_thickness_mm: Optional[float] = None    # configured Z0 sensor thickness (GET 0x3900), read at connect
+        self._config: Optional[MachineConfig] = None     # machine-config struct (GET 0x3106), read at connect
         self._spindle_secs: Optional[int] = None
         self._active_wcs: int   = 0                      # 0=MCS, 1-10=WCS1-WCS10
         self._wcs_offset: tuple = (0.0, 0.0, 0.0, 0.0)  # machine coords of active WCS origin (mm/deg)
@@ -1113,8 +1183,7 @@ class MDX40A:
         """Read the raw 6-byte machine-config struct (Pattern B, GET 0x3106).
 
         RE: query_0x3106_6bytes @ 0x0041a350 → dev_trigger_read(0x3106, buf, 6).
-        Byte[1] is the nc_rml_flags command-set selector — see query_command_set.
-        Internal helper; pair with SET 0x3107 (send_axis_config) to write back.
+        Internal helper; see MachineConfig for the byte layout.
         """
         try:
             data = self.pattern_b_read(0x3106, 6)
@@ -1127,29 +1196,72 @@ class MDX40A:
             log.warning("_query_axis_config failed: %s", e)
             return None
 
-    # Command-set selector values (byte[1] of GET 0x3106 / SET 0x3107).
-    # RE: Setup dialog radio buttons (control IDs 0xFD3/0xFD4/0xFD5), bound via
-    # MFC DDX_Radio so the radio index (0/1/2 from top) maps to nc_rml_flags.
-    # The enable-check at FUN_00402af0 confirms valid range is 0..2.
-    CMDSET_RML1 = 0   # "RML-1"
-    CMDSET_NC   = 1   # "NC Code"
-    CMDSET_AUTO = 2   # "Selected automatically (RML-1/NC Code)" — sniffs first byte
+    def read_config(self) -> Optional[MachineConfig]:
+        """Read the machine-config struct from the device and refresh the cache."""
+        raw = self._query_axis_config()
+        if raw is None:
+            return None
+        self._config = MachineConfig(raw)
+        return self._config
+
+    @property
+    def config(self) -> Optional[MachineConfig]:
+        """Machine-config struct as last read or written, or None if unread."""
+        return self._config
+
+    @property
+    def command_set(self) -> Optional[int]:
+        """Command set (CMDSET_*) as last read or written, or None if unread."""
+        return None if self._config is None else self._config.command_set
 
     def query_command_set(self) -> Optional[int]:
         """Query firmware command-set mode — byte[1] of GET 0x3106.
 
         Returns one of CMDSET_RML1 (0), CMDSET_NC (1), CMDSET_AUTO (2),
-        or None on USB error. See set_command_set() for the value meanings.
+        or None on USB error. Refreshes the cached config.
         """
-        cfg = self._query_axis_config()
-        return None if cfg is None else cfg[1]
+        cfg = self.read_config()
+        return None if cfg is None else cfg.command_set
+
+    def write_config(self, command_set: Optional[int] = None, offset_type: Optional[int] = None,
+                     decimal_method: Optional[int] = None,
+                     optional_block: Optional[int] = None) -> bool:
+        """Change command set and/or NC Code preferences with one read-modify-write.
+
+        RE: write_ncode_settings @ 0x00402a20 — VPanel reads the 6-byte struct, replaces
+        the edited bytes and writes the whole struct back with send_axis_config_0x3107
+        (SET 0x3107), then polls ping bit 21 clear. It only writes if something changed.
+        The settings persist in the firmware across power cycles.
+
+        Raises ValueError for an invalid value, before anything is written. Returns True
+        if nothing needed changing, or if the write was acked and the read-back matches.
+        """
+        current = self.read_config()
+        if current is None:
+            log.warning("write_config: could not read current config")
+            return False
+        wanted = current.with_changes(command_set, offset_type, decimal_method, optional_block)
+        if wanted == current:
+            log.info("write_config: already %s, no write needed", current.raw.hex())
+            return True
+        try:
+            self._link.vend_set(0x3107, wanted.raw)
+            log.info("write_config: SET 0x3107  %s → %s", current.raw.hex(), wanted.raw.hex())
+        except usb.core.USBError as e:
+            log.warning("write_config: SET 0x3107 failed: %s", e)
+            return False
+        acked = self._wait_ping_bit21()
+        readback = self.read_config()
+        if not acked:
+            return False
+        if readback != wanted:
+            log.warning("write_config: read-back %s does not match %s",
+                        None if readback is None else readback.raw.hex(), wanted.raw.hex())
+            return False
+        return True
 
     def set_command_set(self, mode: int) -> bool:
-        """Switch firmware command-set mode (read-modify-write of 6-byte config).
-
-        RE: write_ncode_settings @ 0x00402a20 — reads the 6-byte config via
-        query_0x3106, updates byte[1] (nc_rml_flags), and writes back via
-        send_axis_config_0x3107, which polls ping bit 21 clear after.
+        """Switch firmware command-set mode (read-modify-write of the 6-byte config).
 
         mode:
             0 (CMDSET_RML1) — RML-1 only; G-code blocks are silently dropped.
@@ -1158,24 +1270,11 @@ class MDX40A:
                               (`%` or `(` → NC, otherwise RML-1).
 
         Returns True on firmware ack (or no-op if already in requested mode).
+        See write_config() to change the NC Code preferences too.
         """
-        if mode not in (0, 1, 2):
+        if mode not in CMDSET_LABELS:
             raise ValueError(f"mode must be 0/1/2 (RML/NC/AUTO); got {mode}")
-        cfg = self._query_axis_config()
-        if cfg is None:
-            log.warning("set_command_set: could not read current config")
-            return False
-        if cfg[1] == mode:
-            log.info("set_command_set: already in mode %d, no write needed", mode)
-            return True
-        new_cfg = bytes([cfg[0], mode]) + cfg[2:6]
-        try:
-            self._link.vend_set(0x3107, new_cfg)
-            log.info("set_command_set: SET 0x3107  %s → %s", cfg.hex(), new_cfg.hex())
-        except usb.core.USBError as e:
-            log.warning("set_command_set: SET 0x3107 failed: %s", e)
-            return False
-        return self._wait_ping_bit21()
+        return self.write_config(command_set=mode)
 
     def get_rotary_axis_centreline(self) -> Optional[tuple]:
         """Read stored rotary A-axis centreline from firmware (Pattern B, GET 0x3801).
@@ -1329,6 +1428,12 @@ class MDX40A:
         # on self for the lifetime of the connection.
         self.get_XYZ_axis_scaling()
         self.get_rotary_axis_angle_correction()
+
+        # Read the machine-config struct (GET 0x3106): command set + NC Code preferences.
+        if self.read_config() is not None:
+            log.info("Command set: %s", CMDSET_LABELS.get(self.command_set, f"unknown ({self.command_set})"))
+        else:
+            log.info("Command set read failed")
 
         # Read configured Z0 sensor thickness (GET 0x3900, Pattern B).
         self._z0_thickness_mm = self.get_z0_sensor_thickness_mm()
