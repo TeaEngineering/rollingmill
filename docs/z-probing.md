@@ -1,5 +1,15 @@
 # Z0 sensor probing
 
+Locate the material/tool contact surface on the Z-axis.
+
+A conductive disk is positioned on the workpiece below the tool, which is wired back to the machine. The operation slowly lowers the Z-axis until the cutting bit touches the pad completing a circuit, which stops motion and causes a retreat. The measured Z-height is then adjusted down by the stored height of the conductive pad (14-16mm). The calculated surface height is stored to the device as the selected coordinate system's Z axis origin.
+
+The conductive disk is connected to the rear "Z-origin" sensor port, which is a 3.5mm Jack socket at the rear of the machine. The 3.5mm jack 'tip' *alone* must be connected to the pad, the supplied cable uses a banana plug to make contact with the disk.
+
+The height of the disk can be precisely measured (with calipers) and saved into the firmware - VPanel Setup dialog limits the thickness to 14.000–16.000 mm; the firmware's own limits are not known.
+
+## User notes
+
 Select the coordinate system whose Z origin you want to set with `c` (**User (RML-1)**,
 **EXOFS** or **G54–G59**), activate it, then close the coordinate dialog.
 Then press **b** to open the Z-origin dialog.
@@ -30,8 +40,6 @@ edited value has not been set.
 ## Setting probe thickness
 
 The cycle subtracts the thickness of the conductive pad, which is stored in the machine:
-`SET 0x3902` carries no thickness. The two commands below are the Setup dialog's
-"Thickness of Z0 Sensor" box (see [usb-protocol.md](usb-protocol.md)).
 
 | wValue | Payload | Notes |
 |---|---|---|
@@ -42,25 +50,7 @@ To set 15.030 mm: `SET 0x1109 00`, `SET 0x3901 00 00 3A B6`, wait for the ack, `
 back to check it (`00 00 3A B6`). VPanel limits the value to 14.000–16.000 mm; the firmware's own limits are not
 known. Writing a changed value and reading it back was confirmed on a real MDX-40A.
 
-## Target coordinate system
-
-The first word of `SET 0x3902` is the WCS slot index (the same numbering as
-`WCS_SLOT_NAMES` and the `wcs_code` of `SET 0x3501`); the other two words are `FFFF`.
-From VPanel's `MDx3902_GiantDispatch` (`0x403b10`, operation 6, called from
-`set_origin_using_sensor_button_gd6`), whose `cs` is the "Set Origin Point" dropdown's
-item ID (`dialog_poulate_coordinatesys_dropdown`, `0x413e80`):
-
-| Slot (`cs`) | Coordinate system | First word | VPanel encoder |
-|---|---|---|---|
-| 0 | MCS | not allowed | — |
-| 1 | User (RML-1) | `0001` | `0x41b270` |
-| 2 | EXOFS | `0002` | `0x41b2b0` |
-| 3–8 | G54–G59 | `0003`–`0008` | `0x41b2f0(cs + 0x33)`: `(G − 54) + 3` |
-| 10–310 | G54.1 P1–P300 | `cs − 1` | `0x41b340(cs − 9)`: `(n − 1) + 9`; not implemented here |
-
-## Protocol evidence
-
-A passive VPanel/USB-driver capture from a physical MDX-40A showed:
+## Z-probe cycle
 
 1. SET 0x03F5 payload 02, operation begin SET 0x1109 payload 00.
 2. Stop spindle: SET 0x3006 uint32 big-endian zero.
@@ -77,3 +67,19 @@ The captured cycle descended at 60 mm/min, retracted at 1800 mm/min and ended
 in about 16.9 seconds. Those speeds are firmware-controlled, not hard-coded
 motion commands. A lowest sampled Z of -79.880 mm preceded reversal; exact
 contact instant was between samples. No text success response is sent.
+
+### Target coordinate system (slot)
+
+The first word of `SET 0x3902` is the WCS slot index (the same numbering as
+`WCS_SLOT_NAMES` and the `wcs_code` of `SET 0x3501`).
+From VPanel's `MDx3902_GiantDispatch` (`0x403b10`, operation 6, called from
+`set_origin_using_sensor_button_gd6`), whose `cs` is the "Set Origin Point" dropdown's
+item ID (`dialog_poulate_coordinatesys_dropdown`, `0x413e80`):
+
+| Slot (`cs`) | Coordinate system | First word | VPanel encoder |
+|---|---|---|---|
+| 0 | MCS | not allowed | — |
+| 1 | User (RML-1) | `0001` | `0x41b270` |
+| 2 | EXOFS | `0002` | `0x41b2b0` |
+| 3–8 | G54–G59 | `0003`–`0008` | `0x41b2f0(cs + 0x33)`: `(G − 54) + 3` |
+| 10–310 | G54.1 P1–P300 | `cs − 1` | `0x41b340(cs − 9)`: `(n − 1) + 9`; not implemented here |
