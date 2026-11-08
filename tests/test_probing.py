@@ -92,13 +92,50 @@ def test_reject_unsafe_state(flag):
     assert not any(c == 0x3902 for c, _ in link.sent)
 
 
-def test_unsupported_wcs_no_writes():
+@pytest.mark.parametrize("slot", [0, 9, 10])
+def test_unsupported_wcs_no_writes(slot):
+    # MCS has no origin to set; slots 9-10 have no sensor-cycle code in VPanel.
     link, m, probe, _ = fixture()
-    m.set_active_wcs(3)
+    m.set_active_wcs(slot)
     link.sent.clear()
-    with pytest.raises(ValueError, match="RML-1"):
+    with pytest.raises(ValueError, match="Select User"):
         probe.start()
     assert link.sent == []
+
+
+@pytest.mark.parametrize("slot", range(1, 9))
+def test_wire_packet_first_word_is_the_wcs_slot(slot):
+    # VPanel's MDx3902_GiantDispatch: 1 = User, 2 = EXOFS, 3-8 = G54-G59 (cs + 0x33 → (G-54)+3).
+    link, m, probe, _ = fixture()
+    m.set_active_wcs(slot)
+    link.sent.clear()
+    probe.start()
+    assert (0x3902, struct.pack(">HHH", slot, 0xFFFF, 0xFFFF)) in link.sent
+    assert probe.slot == slot
+
+
+def test_g54_cycle_refreshes_that_slot_not_user():
+    link, m, probe, clock = fixture()
+    link._responses[0x3203] = struct.pack(">4i", 1000, 2000, -3000, 0)  # G54 origin after the cycle
+    m.set_active_wcs(3)
+    link.sent.clear()
+    probe.start()
+    assert "WCS1 (G54)" in probe.message
+    probe.update(_decode_state(IDLE))
+    samples = json.loads((Path(__file__).parent / "fixtures/mdx40a_zprobe_status.json").read_text())
+    moving = False
+    for data in samples:
+        state = _decode_state(bytes(data))
+        moving |= bool(state.flags & 0x04000000)
+        if moving:
+            clock[0] += 0.2
+            probe.update(state)
+            if not probe.active:
+                break
+    assert not probe.active and "WCS1 (G54)" in probe.message and "-3.000" in probe.message
+    assert m.wcs_offset[2] == pytest.approx(-3.0)
+    assert (0x030b, b"") not in link.sent[-2:]       # slot 1's origin is not what was refreshed
+    assert link.sent[-1] == (0x3203, b"")
 
 
 def test_no_motion_timeout_is_not_success():

@@ -1,7 +1,9 @@
 """Cooperative Z0 sensor cycle captured on a real MDX-40A.
 
-Only the User/RML-1 origin (mode 1) is supported. No sensor thickness or
-uncaptured coordinate-mode settings are written.
+The cycle sets the Z origin of the active coordinate system: User/RML-1 (slot 1,
+the captured cycle), EXOFS (slot 2) or G54-G59 (slots 3-8). The first word of
+SET 0x3902 is the slot index, as VPanel's MDx3902_GiantDispatch encodes it (see
+docs/z-probing.md). No sensor thickness or uncaptured settings are written.
 """
 import logging
 import struct
@@ -9,10 +11,15 @@ import time
 
 import usb.core
 
-from .machine import FLAG_CMD_MOVE, FLAG_DOOR, FLAG_ERROR, FLAG_MOVING, FLAG_SPINDLE, _decode_state
+from .machine import (FLAG_CMD_MOVE, FLAG_DOOR, FLAG_ERROR, FLAG_MOVING, FLAG_SPINDLE,
+                      _decode_state, wcs_label)
 
 log = logging.getLogger(__name__)
 MOTION = FLAG_CMD_MOVE | FLAG_MOVING | 0x00002000
+
+# WCS slots the probe can target: 1 = User (RML-1), 2 = EXOFS, 3-8 = G54-G59. Only slot 1
+# has a live capture. VPanel only offers slots 2-8 when the command set is NC Code or automatic.
+PROBE_SLOTS = range(1, 9)
 
 
 class ZProbe:
@@ -23,6 +30,7 @@ class ZProbe:
         self.clock = clock
         self.active = False
         self.message = ""
+        self.slot = 0  # WCS slot being probed, set by start()
         self._bracket = False
         self._seen_motion = False
         self._cancelled = False
@@ -32,8 +40,12 @@ class ZProbe:
     def start(self):
         if self.active:
             raise ValueError("A Z-probe cycle is already active")
-        if self.machine.active_wcs != 1:
-            raise ValueError("Select User (RML-1) in the coordinate dialog first")
+        slot = self.machine.active_wcs
+        if slot not in PROBE_SLOTS:
+            raise ValueError(
+                "Select User (RML-1), EXOFS or G54-G59 in the coordinate dialog first "
+                f"(active: {wcs_label(slot)})"
+            )
         state = self.machine.poll()
         if state is None or not state.idle or self.machine.is_busy:
             raise ValueError("Fresh idle machine status is required")
@@ -56,11 +68,12 @@ class ZProbe:
                     raise ValueError("Z0 sensor is not connected")
                 if sensor[1] & 0x08:
                     raise ValueError("Z0 sensor is already in contact with the tool")
+            self.slot = slot
             self._started = self._last_fresh = self.clock()
             self._seen_motion = self._cancelled = False
             self.active = True
-            self.message = "Z-probe starting; Esc stops motion"
-            link.vend_set(0x3902, struct.pack(">HHH", 1, 0xFFFF, 0xFFFF))
+            self.message = f"Z-probe of {wcs_label(slot)} starting; Esc stops motion"
+            link.vend_set(0x3902, struct.pack(">HHH", slot, 0xFFFF, 0xFFFF))
         except (ValueError, usb.core.USBError):
             if self.active:
                 # Motion write outcome is unknown. Keep UI locked until fresh idle.
@@ -132,11 +145,12 @@ class ZProbe:
             if self._cancelled:
                 self.message = "Z-probe stopped; origin result unverified"
             else:
-                origin = self.machine.get_wcs_origin(1)
+                origin = self.machine.get_wcs_origin(self.slot)
                 if origin is None:
-                    raise ValueError("Cycle ended but User origin could not be refreshed")
-                self.machine._wcs_offset = origin
-                self.message = f"Z-probe cycle ended; User Z origin {origin[2]:.3f} mm"
+                    raise ValueError(f"Cycle ended but {wcs_label(self.slot)} origin could not be refreshed")
+                if self.machine.active_wcs == self.slot:
+                    self.machine._wcs_offset = origin
+                self.message = f"Z-probe cycle ended; {wcs_label(self.slot)} Z origin {origin[2]:.3f} mm"
             log.info(self.message)
         except (ValueError, usb.core.USBError) as exc:
             self.message = f"Z-probe result unverified: {exc}"
