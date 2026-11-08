@@ -174,8 +174,12 @@ if (cfg.nc_rml_flags != desired) {
 }
 ```
 
-Mirrored in `mdx40a/machine.py` as `MDX40A.set_command_set(mode)`. The setting
-is persisted by the firmware across power cycles.
+Mirrored in `rollingmill/machine.py` as `MDX40A.set_command_set(mode)`, or `MDX40A.write_config(...)`
+which changes the command set and the NC Code preferences (decimal-point method, tool-diameter
+offset type, optional block) in one write; the same 6 bytes carry both, see
+[usb-protocol.md](usb-protocol.md#machine-config-struct-0x3106--0x3107). The setting
+is persisted by the firmware across power cycles. The TUI's `n` key edits it, and the header shows
+the command set read at connect.
 
 ---
 

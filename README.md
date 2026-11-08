@@ -70,6 +70,7 @@ The interactive TUI exposes the following keybindings:
 | <kbd>c</kbd> | coordinate systems (activate / move-to / overwrite) |
 | <kbd>m</kbd> | Move-To picker (presets + User Specify numeric entry) |
 | <kbd>t</kbd> | tool diameter offsets |
+| <kbd>n</kbd> | command mode: RML-1 / NC Code / automatic, plus the NC Code preferences (tool-diameter offset type, decimal-point method, optional block); <kbd>Space</kbd> selects, <kbd>Enter</kbd> applies |
 | <kbd>b</kbd> | Z0 sensor probe dialog (sets the Z origin of User, EXOFS or G54–G59 using probe) |
 | <kbd>q</kbd> | quit |
 
