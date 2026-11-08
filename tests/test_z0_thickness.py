@@ -97,6 +97,7 @@ def test_dialog_shows_stored_value_and_h_sets_it():
     from rollingmill.tui import TUI, _LogBuffer
     link = _Recording()
     m = MDX40A(link)
+    m.set_active_wcs(1)
     tui = TUI(m, _LogBuffer())
     tui._handle_key(ord('b'))
     assert tui._probe_confirm and tui._probe_buf == '14.140' and not tui._probe_dirty
@@ -124,15 +125,21 @@ def test_enter_is_refused_until_edited_value_is_set():
     assert "H" in tui._probe_notice and link.sent == []
 
 
-def test_enter_is_refused_for_a_workspace_without_a_sensor_cycle():
+@pytest.mark.parametrize("slot", [0, 9, 10])
+def test_b_in_an_unprobeable_workspace_logs_a_warning_instead_of_opening(slot, caplog):
+    import logging
+
     from rollingmill.tui import TUI, _LogBuffer
     link = _Recording()
-    tui = TUI(MDX40A(link), _LogBuffer())            # MCS is active
-    tui._handle_key(ord('b'))
+    m = MDX40A(link)
+    m.set_active_wcs(slot)
+    tui = TUI(m, _LogBuffer())
     link.sent.clear()
-    tui._handle_key(10)
-    assert tui._probe_confirm and not tui._probe.active
-    assert "Select User" in tui._probe_notice and link.sent == []
+    with caplog.at_level(logging.WARNING):
+        tui._handle_key(ord('b'))
+    assert not tui._probe_confirm and not tui._probe.active
+    assert any("select User, EXOFS or G54-G59" in r.getMessage() for r in caplog.records)
+    assert link.sent == []
 
 
 @pytest.mark.parametrize("config,expected", [(b"\x00\x00", 0), (b"\x00\x01", 1), (b"\x00\x02", 2)])
@@ -140,7 +147,9 @@ def test_dialog_reads_command_set_when_opened(config, expected):
     from rollingmill.tui import TUI, _LogBuffer
     link = _Recording()
     link._responses[0x3106] = config + b"\x00" * 4
-    tui = TUI(MDX40A(link), _LogBuffer())
+    m = MDX40A(link)
+    m.set_active_wcs(1)
+    tui = TUI(m, _LogBuffer())
     tui._handle_key(ord('b'))
     assert tui._probe_cmdset == expected
 
@@ -148,7 +157,9 @@ def test_dialog_reads_command_set_when_opened(config, expected):
 def test_out_of_range_h_keeps_dialog_and_writes_nothing():
     from rollingmill.tui import TUI, _LogBuffer
     link = _Recording()
-    tui = TUI(MDX40A(link), _LogBuffer())
+    m = MDX40A(link)
+    m.set_active_wcs(1)
+    tui = TUI(m, _LogBuffer())
     tui._handle_key(ord('b'))
     _type(tui, '20')
     link.sent.clear()
@@ -159,7 +170,9 @@ def test_out_of_range_h_keeps_dialog_and_writes_nothing():
 def test_esc_closes_without_writing():
     from rollingmill.tui import TUI, _LogBuffer
     link = _Recording()
-    tui = TUI(MDX40A(link), _LogBuffer())
+    m = MDX40A(link)
+    m.set_active_wcs(1)
+    tui = TUI(m, _LogBuffer())
     tui._handle_key(ord('b'))
     _type(tui, '15')
     link.sent.clear()

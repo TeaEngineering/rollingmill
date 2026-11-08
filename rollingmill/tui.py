@@ -324,6 +324,10 @@ class TUI:
         elif key in (ord('b'), ord('B')):
             if self._cut_job or self._jog_armed or self._drill_active:
                 logging.getLogger(__name__).warning("Close the NC job and stop jogging/drilling before Z-probing")
+            elif self._m.active_wcs not in PROBE_SLOTS:
+                logging.getLogger(__name__).warning(
+                    "Z-probe: select User, EXOFS or G54-G59 coords with c first (active: %s)",
+                    _machine.wcs_label(self._m.active_wcs))
             else:
                 self._probe_open_dialog()
         elif key in (ord('p'), ord('P')):
@@ -343,9 +347,6 @@ class TUI:
         if key in (27, ord('q'), ord('Q')):
             self._probe_confirm = False
         elif key in (10, 13):                           # Enter — start the probe cycle
-            if self._m.active_wcs not in PROBE_SLOTS:
-                self._probe_notice = 'Select User, EXOFS or G54-G59 with c first'
-                return
             if self._probe_dirty:
                 self._probe_notice = 'Thickness edited: press H to set it first'
                 return
@@ -570,16 +571,11 @@ class TUI:
             self._put(win, 1 + i, 2, line[:dw - 4], CP(_CP_LABEL))
 
         slot = self._m.active_wcs
-        target = _machine.wcs_label(slot)
-        if slot in PROBE_SLOTS:
-            self._put(win, 4, 2, 'Target:', CP(_CP_LABEL))
-            self._put(win, 4, 10, target, CP(_CP_VALUE) | BOLD)
-            if slot >= 2 and self._probe_cmdset == _machine.MDX40A.CMDSET_RML1:
-                self._put(win, 5, 2, 'Command set is RML-1; VPanel only offers this in NC/auto mode'[:dw - 4],
-                          CP(_CP_LOG_WARN))
-        else:
-            self._put(win, 4, 2, f'Target: {target} - select User, EXOFS or G54-G59 with c'[:dw - 4],
-                      CP(_CP_LOG_WARN) | BOLD)
+        self._put(win, 4, 2, 'Target:', CP(_CP_LABEL))
+        self._put(win, 4, 10, _machine.wcs_label(slot), CP(_CP_VALUE) | BOLD)
+        if slot >= 2 and self._probe_cmdset == _machine.MDX40A.CMDSET_RML1:
+            self._put(win, 5, 2, 'Command set is RML-1; VPanel only offers this in NC/auto mode'[:dw - 4],
+                      CP(_CP_LOG_WARN))
 
         stored = self._m.z0_sensor_thickness_mm
         stored_str = f'{stored:.3f} mm' if stored is not None else '?'
