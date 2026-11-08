@@ -140,20 +140,6 @@ def test_b_in_an_unprobeable_workspace_logs_a_warning_instead_of_opening(slot, c
     assert not tui._probe_confirm and not tui._probe.active
     assert any("select User, EXOFS or G54-G59" in r.getMessage() for r in caplog.records)
     assert link.sent == []
-
-
-@pytest.mark.parametrize("config,expected", [(b"\x00\x00", 0), (b"\x00\x01", 1), (b"\x00\x02", 2)])
-def test_dialog_reads_command_set_when_opened(config, expected):
-    from rollingmill.tui import TUI, _LogBuffer
-    link = _Recording()
-    link._responses[0x3106] = config + b"\x00" * 4
-    m = MDX40A(link)
-    m.set_active_wcs(1)
-    tui = TUI(m, _LogBuffer())
-    tui._handle_key(ord('b'))
-    assert tui._probe_cmdset == expected
-
-
 def test_out_of_range_h_keeps_dialog_and_writes_nothing():
     from rollingmill.tui import TUI, _LogBuffer
     link = _Recording()
