@@ -567,7 +567,7 @@ class TUI:
         # Row: spindle speed + on/off
         # Layout: spindle  OFF  live 9000  tgt  9000  ×100% =  9000 RPM  feed 100%  runtime Xh XXm
         #         RE: actual_rpm = MulDiv(target_rpm, pct, 100) @ update_state_and_coords
-        #         <> keys set target RPM (SET 0x3901); +- keys set both override %s together
+        #         <> keys set the host-side target RPM (sent with SET 0x3006); +- keys set both override %s together
         row += 1
         if row < height:
             spindle_on  = bool(s.flags & FLAG_SPINDLE)
