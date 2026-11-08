@@ -50,7 +50,7 @@ from .machine import (FLAG_VIEW_LED, FLAG_DOOR, FLAG_SPINDLE, FLAG_CMD_MOVE,
 from .check import lint_file
 from .trace import Tracer
 from .cutjob import CutJob
-from .probing import ZProbe
+from .probing import PROBE_SLOTS, ZProbe
 
 # ── Jog parameters ────────────────────────────────────────────────────────────
 
@@ -145,6 +145,7 @@ class TUI:
         self._probe_buf     = ''      # Z0 thickness edit buffer (mm)
         self._probe_dirty   = False   # buffer edited but not yet sent with H
         self._probe_notice  = ''      # last result shown in the dialog
+        self._probe_cmdset  = None    # command set read when the dialog opened (0 RML-1, 1 NC, 2 auto)
 
     # ── Entry point ───────────────────────────────────────────────────────────
 
@@ -335,12 +336,16 @@ class TUI:
         self._probe_buf    = f'{thickness:.3f}' if thickness is not None else ''
         self._probe_dirty  = False
         self._probe_notice = ''
+        self._probe_cmdset = self._m.query_command_set()
         self._probe_confirm = True
 
     def _probe_dialog_key(self, key: int) -> None:
         if key in (27, ord('q'), ord('Q')):
             self._probe_confirm = False
         elif key in (10, 13):                           # Enter — start the probe cycle
+            if self._m.active_wcs not in PROBE_SLOTS:
+                self._probe_notice = 'Select User, EXOFS or G54-G59 with c first'
+                return
             if self._probe_dirty:
                 self._probe_notice = 'Thickness edited: press H to set it first'
                 return
@@ -541,7 +546,7 @@ class TUI:
         CP   = curses.color_pair
         BOLD = curses.A_BOLD
 
-        dh = 12
+        dh = 13
         dw = min(66, cols - 2)
         if rows < dh + 2 or dw < 40:
             self._put(stdscr, 0, 0, "Z-probe: enlarge terminal; Esc cancels")
@@ -557,24 +562,36 @@ class TUI:
         self._put(win, 0, 2, ' Z0 Sensor Probe', CP(_CP_HEADER) | BOLD)
 
         lines = [
-            'Set the User (RML-1) Z origin using the Z0 sensor.',
+            'Set the Z origin of the target below using the Z0 sensor.',
             'Clean and connect the sensor and place it on the workpiece.',
             'Position the tool directly above it and close the cover.',
         ]
         for i, line in enumerate(lines):
             self._put(win, 1 + i, 2, line[:dw - 4], CP(_CP_LABEL))
 
+        slot = self._m.active_wcs
+        target = _machine.wcs_label(slot)
+        if slot in PROBE_SLOTS:
+            self._put(win, 4, 2, 'Target:', CP(_CP_LABEL))
+            self._put(win, 4, 10, target, CP(_CP_VALUE) | BOLD)
+            if slot >= 2 and self._probe_cmdset == _machine.MDX40A.CMDSET_RML1:
+                self._put(win, 5, 2, 'Command set is RML-1; VPanel only offers this in NC/auto mode'[:dw - 4],
+                          CP(_CP_LOG_WARN))
+        else:
+            self._put(win, 4, 2, f'Target: {target} - select User, EXOFS or G54-G59 with c'[:dw - 4],
+                      CP(_CP_LOG_WARN) | BOLD)
+
         stored = self._m.z0_sensor_thickness_mm
         stored_str = f'{stored:.3f} mm' if stored is not None else '?'
         field = (self._probe_buf + '_') if self._probe_dirty else (self._probe_buf or '?')
         attr = (CP(_CP_ACTIVE) | BOLD) if self._probe_dirty else (CP(_CP_VALUE) | BOLD)
-        self._put(win, 5, 2, 'Thickness of Z0 sensor:', CP(_CP_LABEL))
-        self._put(win, 5, 26, f' {field:<9s}', attr)
-        self._put(win, 5, 37, 'mm', CP(_CP_LABEL))
-        self._put(win, 6, 2, f'in machine: {stored_str}   (limits {_machine.Z0_THICKNESS_MIN_MM:.0f}'
+        self._put(win, 6, 2, 'Thickness of Z0 sensor:', CP(_CP_LABEL))
+        self._put(win, 6, 26, f' {field:<9s}', attr)
+        self._put(win, 6, 37, 'mm', CP(_CP_LABEL))
+        self._put(win, 7, 2, f'in machine: {stored_str}   (limits {_machine.Z0_THICKNESS_MIN_MM:.0f}'
                              f'–{_machine.Z0_THICKNESS_MAX_MM:.0f} mm)'[:dw - 4], CP(_CP_DIM))
         if self._probe_notice:
-            self._put(win, 8, 2, self._probe_notice[:dw - 4], CP(_CP_LOG_WARN) | BOLD)
+            self._put(win, 9, 2, self._probe_notice[:dw - 4], CP(_CP_LOG_WARN) | BOLD)
 
         keys = ' Enter start probe   H set thickness   0-9 . edit   Esc cancel'
         self._put(win, dh - 3, 1, '─' * (dw - 2), CP(_CP_LABEL))

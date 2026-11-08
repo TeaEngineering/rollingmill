@@ -146,6 +146,7 @@ Payload layouts and dispatch detail live in [move-commands.md](move-commands.md)
 | wValue | Payload | Notes |
 |--------|---------|-------|
 | `0x3901` | `>I` — thickness uint32, 1/1000 mm | Write Z0 sensor thickness (Setup dialog OK; VPanel limits it to 14000–16000); poll ping bit 21 clear after. |
+| `0x3902` | `>HHH` — slot, -1, -1 | Probe for Z0 sensor, then update Z-axis origin in coordinate system slot. |
 
 See [z-probing.md](z-probing.md) for the `SET 0x3902` operation that uses the z-origin sensor.
 

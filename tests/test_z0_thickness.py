@@ -113,13 +113,36 @@ def test_dialog_shows_stored_value_and_h_sets_it():
 def test_enter_is_refused_until_edited_value_is_set():
     from rollingmill.tui import TUI, _LogBuffer
     link = _Recording()
-    tui = TUI(MDX40A(link), _LogBuffer())
+    m = MDX40A(link)
+    m.set_active_wcs(1)
+    tui = TUI(m, _LogBuffer())
     tui._handle_key(ord('b'))
     _type(tui, '15.03')
     link.sent.clear()
     tui._handle_key(10)
     assert tui._probe_confirm and not tui._probe.active
     assert "H" in tui._probe_notice and link.sent == []
+
+
+def test_enter_is_refused_for_a_workspace_without_a_sensor_cycle():
+    from rollingmill.tui import TUI, _LogBuffer
+    link = _Recording()
+    tui = TUI(MDX40A(link), _LogBuffer())            # MCS is active
+    tui._handle_key(ord('b'))
+    link.sent.clear()
+    tui._handle_key(10)
+    assert tui._probe_confirm and not tui._probe.active
+    assert "Select User" in tui._probe_notice and link.sent == []
+
+
+@pytest.mark.parametrize("config,expected", [(b"\x00\x00", 0), (b"\x00\x01", 1), (b"\x00\x02", 2)])
+def test_dialog_reads_command_set_when_opened(config, expected):
+    from rollingmill.tui import TUI, _LogBuffer
+    link = _Recording()
+    link._responses[0x3106] = config + b"\x00" * 4
+    tui = TUI(MDX40A(link), _LogBuffer())
+    tui._handle_key(ord('b'))
+    assert tui._probe_cmdset == expected
 
 
 def test_out_of_range_h_keeps_dialog_and_writes_nothing():
