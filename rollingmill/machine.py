@@ -80,7 +80,7 @@ _TOOL_OFFSET_WRITE_WVAL = tuple(0x347a + i for i in range(1, 9))   # 0x347b..0x3
 _PING_BUSY_MASK  = 0x00200004   # bits 21 and 2 — firmware busy (jog motion-complete gate)
 _PING_ERROR_MASK = 0x00100000   # bit 20
 _PING_BIT21      = 0x00200000   # bit 21 alone — "command acknowledged" flag polled after
-                                # SET 0x3901 (spindle RPM), SET 0x2425 (reset time), etc.
+                                # SET 0x3901 (Z0 sensor thickness), SET 0x2425 (reset time), etc.
 
 # ── Machine status flags (first 4 bytes of wValue=0x0100 block, big-endian) ──
 #
@@ -213,7 +213,8 @@ class MDX40A:
         self._cutting_feed_pct: int = 100    # cached cutting feed override %
         self._spindle_range: Optional[tuple] = None          # (speed_min, speed_max) uint32 pair from GET 0x3005
         self._spindle_live_speed: Optional[int] = None       # latest GET 0x3003 uint32 — current spindle/feed speed
-        self._spindle_target_rpm: int = SPINDLE_RPM_MIN  # configured target RPM (GET/SET 0x3900/0x3901)
+        self._spindle_target_rpm: int = SPINDLE_RPM_MIN  # host-side target RPM; pushed to the mill with SET 0x3006
+        self._z0_thickness_mm: Optional[float] = None    # configured Z0 sensor thickness (GET 0x3900), read at connect
         self._spindle_secs: Optional[int] = None
         self._active_wcs: int   = 0                      # 0=MCS, 1-10=WCS1-WCS10
         self._wcs_offset: tuple = (0.0, 0.0, 0.0, 0.0)  # machine coords of active WCS origin (mm/deg)
@@ -489,23 +490,36 @@ class MDX40A:
         """
         return self._spindle_live_speed
 
-    def get_spindle_rpm(self) -> Optional[int]:
-        """Read configured spindle target RPM from device (Pattern B, GET 0x3900).
+    def get_z0_sensor_thickness_mm(self) -> Optional[float]:
+        """Read the configured Z0 sensor thickness from the device, in mm.
 
-        RE: get_uint32_0x3900 @ 0x41b220 — dev_trigger_read_uint32s(0x3900, buf, 1).
-        Returns RPM as uint32 (big-endian from device), or None on error.
+        Pattern B, GET 0x3900 → one big-endian uint32 in 1/1000 mm (15000 = 15 mm).
+        RE: get_uint32_0x3900 @ 0x0041b200 — dev_trigger_read_uint32s(0x3900, buf, 1).
+        Its only caller is read_nc_mode_tool_radius_settings, which fills the
+        "Thickness of Z0 Sensor:" edit box (dialog 4050, control 0x0FD9) of the
+        Setup dialog. VPanel's UI limits it to 14.000–16.000 mm. The matching
+        write is SET 0x3901 (MdxAction_x3901_p1, only called from the Setup
+        dialog's OK handler); rollingmill does not write it. The firmware
+        uses this value when a Z0 sensor cycle (SET 0x3902) sets the Z origin.
+
+        Returns None on error or a short reply.
         """
         try:
             data = self.pattern_b_read(0x3900, 4)
             if data is None or len(data) < 4:
-                log.warning("get_spindle_rpm: short/no response")
+                log.warning("get_z0_sensor_thickness_mm: short/no response")
                 return None
-            rpm = struct.unpack_from('>I', bytes(data))[0]
-            log.debug("Spindle target RPM read: %d", rpm)
-            return rpm
-        except usb.core.USBError as e:
-            log.warning("get_spindle_rpm failed: %s", e)
+            thickness = struct.unpack_from('>I', bytes(data))[0] / 1000.0
+            log.debug("Z0 sensor thickness read: %.3f mm", thickness)
+            return thickness
+        except (usb.core.USBError, ValueError) as e:
+            log.warning("get_z0_sensor_thickness_mm failed: %s", e)
             return None
+
+    @property
+    def z0_sensor_thickness_mm(self) -> Optional[float]:
+        """Z0 sensor thickness in mm as read at connect time, or None if unread."""
+        return self._z0_thickness_mm
 
     def set_target_rpm(self, rpm: int) -> int:
         """Update the cached spindle target RPM only — does not touch the device.
@@ -521,10 +535,9 @@ class MDX40A:
         return rpm
 
     def spindle_on_rpm(self, rpm: int) -> None:
-        """Set spindle target RPM (SET 0x3901, 1 × big-endian uint32).
+        """Set spindle target RPM (SET 0x3006, 1 × big-endian uint32).
 
-        RE: FUN_0041b230 @ 0x41b230 — send_trigger_u32_array(0x3901, &rpm, 1)
-        then wait_ping_bit21_clear. RPM is clamped to [4500, 15000].
+        RPM is clamped to [4500, 15000] (SPINDLE_RPM_MIN/MAX).
         Updates the cached _spindle_target_rpm immediately so rapid key presses
         accumulate correctly even before the USB round-trip completes.
         """
@@ -769,7 +782,7 @@ class MDX40A:
         """Poll GET 0x0001 until bit 21 (_PING_BIT21) clears — firmware command ack.
 
         RE: wait_ping_bit21_clear (FUN_0041b930) in VP_MDX40A.exe, 3 s timeout.
-        Used after SET 0x3901 (spindle RPM), SET 0x2425 (reset spindle time),
+        Used after SET 0x3901 (Z0 sensor thickness), SET 0x2425 (reset spindle time),
         SET 0x3107 (axis config), SET 0x347b-0x3482 (axis params), SET 0x2012 (limits).
         """
         deadline = time.monotonic() + timeout
@@ -1271,13 +1284,12 @@ class MDX40A:
         self.get_XYZ_axis_scaling()
         self.get_rotary_axis_angle_correction()
 
-        # Read configured spindle target RPM (GET 0x3900, Pattern B)
-        rpm = self.get_spindle_rpm()
-        if rpm is not None and SPINDLE_RPM_MIN <= rpm <= SPINDLE_RPM_MAX:
-            self._spindle_target_rpm = rpm
-            log.info("Spindle target RPM read from device: %d", rpm)
+        # Read configured Z0 sensor thickness (GET 0x3900, Pattern B).
+        self._z0_thickness_mm = self.get_z0_sensor_thickness_mm()
+        if self._z0_thickness_mm is not None:
+            log.info("Z0 sensor thickness: %.3f mm", self._z0_thickness_mm)
         else:
-            log.info("Spindle RPM read failed or out of range (%s); defaulting to %d", rpm, SPINDLE_RPM_MIN)
+            log.info("Z0 sensor thickness read failed")
 
     def _read_state(self) -> Optional[MachineState]:
         """Read the 0x0100 state block (XYZA coords + flags) and cache on self._state.

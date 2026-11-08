@@ -73,8 +73,16 @@ All status/config queries use Pattern B. The polling step is mandatory — firin
 |--------|------|----------|-------|
 | `0x3003` | `get_uint32_0x3003` | 4 bytes | Current spindle/feed speed; clamped to `[0x3005.min, 0x3005.max]` |
 | `0x3005` | `get_speed_range_0x3005` | 8 bytes | Spindle speed range `[min_speed, max_speed]`; stored at `obj[0x21]`/`obj[0x22]` |
-| `0x3900` | `get_uint32_0x3900` | 4 bytes BE | Configured spindle target RPM; range 4500–15000 |
 | `0x2405` | `get_status_struct_0x2405` | 16 bytes | `uint32[0]` = total spindle rotation time in seconds |
+
+### Z0 sensor
+
+| wValue | Name | Data | Notes |
+|--------|------|------|-------|
+| `0x3900` | `get_uint32_0x3900` | 4 bytes BE (Pattern B) | Configured **thickness of the Z0 sensor**, 1/1000 mm (`15000` = 15 mm). Setup dialog → Modeling Machine → "Thickness of Z0 Sensor:" (dialog resource 4050, edit control `0x0FD9`) |
+| `0x2001` | `trigger_read_0x2001` | 2 bytes (Pattern B) | Sensor status: bit 2 = connected, bit 3 = in contact |
+
+See [z-probing.md](z-probing.md) for the `SET 0x3902` operation that uses the z-origin sensor.
 
 ### Coordinate systems / WCS
 
@@ -97,8 +105,8 @@ All status/config queries use Pattern B. The polling step is mandatory — firin
 | `0x3700` | `get_uint32_0x3700` | 4 bytes | Single int32 - unknown purpose read 0x3700 write 0x3701, related to rotary axis/jig detect |
 | `0x3801` | `get_rotary_axis_centreline_0x3801` | 12 bytes | 3×uint32 = stored rotary A-axis centreline `[X, Y, Z]` in 1/1000 mm. Only `Y, Z` define the line (X is "along" the rotation axis, so its value is informational only). Written by the jig-detect routine via `SET 0x3803`. Read by the "Current Jig" indicator in the main panel — see [rotary-jig-alignment.md](rotary-jig-alignment.md#current-jig-indicator). |
 | `0x3804` | `get_rotary_axis_angle_correction` | 24 bytes | 6 × int32 BE in 1/1000 mm: `[refX1, ofsY1, ofsZ1, refX2, ofsY2, ofsZ2]` — rotary A-axis two-point angle correction. See [machine-calibration.md](machine-calibration.md#rotary-axis-calibration). |
-| `0x3a02` | `get_2uint32_0x3a02` | 8 bytes | 2×uint32 |
-| `0x3a05` | `get_uint32_0x3a05` | 4 bytes | Used in spindle-stop to override Z for positioning |
+| `0x3a02` | `get_2uint32_0x3a02` | 8 bytes (Pattern B) | Tool-sensor X, Y location on the rotary unit (1/1000 mm) |
+| `0x3a05` | `get_uint32_0x3a05` | 4 bytes | Z value read by Jig Detection (`start_jig_detect_dialog`) and used as the Z of both detection points |
 | `0x05f0` | `get_XYZ_axis_scaling` | 32 bytes | 8 × uint32 BE = 4 numerators then 4 denominators (axis order X, Y, Z, A). Effective scale per axis = `numerator / denominator`. See [machine-calibration.md](machine-calibration.md#axis-scaling). |
 
 ---
@@ -131,8 +139,15 @@ Payload layouts and dispatch detail live in [move-commands.md](move-commands.md)
 | `0x3008` | 1 byte (10–200) | Spindle speed override % |
 | `0x3009` | (bare) | Spindle stop; followed by `wait_busy_bits_clear` in drilling sequences |
 | `0x3809` | `<HH` — [1, 0xFFFF] start / [0, 0] stop | Rotary A-axis drilling mode (continuous slow rotation) |
-| `0x3901` | `>I` — RPM uint32 | Write spindle target RPM (4500–15000); poll ping bit 21 clear after |
 | `0x2425` | (bare) | Reset spindle rotation time counter to zero; poll ping bit 21 clear after |
+
+### Z0 sensor
+
+| wValue | Payload | Notes |
+|--------|---------|-------|
+| `0x3901` | `>I` — thickness uint32, 1/1000 mm | Write Z0 sensor thickness (Setup dialog OK; VPanel limits it to 14000–16000); poll ping bit 21 clear after. |
+
+See [z-probing.md](z-probing.md) for the `SET 0x3902` operation that uses the z-origin sensor.
 
 ### Feed rate
 
@@ -211,7 +226,7 @@ GET 0x0002                (machine type — expect high word 0x1234)
 SET 0x03f5  b'\x00'       (keepalive)
 SET 0x05f0 → GET 0x0003   (axis scaling — 8×uint32, see machine-calibration.md)
 SET 0x3804 → GET 0x0003   (rotary angle correction — 6×int32)
-SET 0x3900 → GET 0x0003   (read configured spindle RPM)
+SET 0x3900 → GET 0x0003   (read configured Z0 sensor thickness, 1/1000 mm)
 ```
 
 ---

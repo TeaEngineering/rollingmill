@@ -75,7 +75,7 @@ struct.unpack_from('<I', data)[0]
 | 20 | `0x00100000` | ERROR_MASK | Device error condition |
 | 13 | `0x00002000` | ACK_JOG | Transient acknowledgement for `SET 0x4f5` (relative jog) |
 | 12 | `0x00001000` | ACK_ABS | Transient acknowledgement for `SET 0x4f7` (absolute move) |
-| 21 | `0x00200000` | CMD_ACK | Clears after `SET 0x3901` / `SET 0x2425` / `SET 0x3107` / axis param writes |
+| 21 | `0x00200000` | CMD_ACK | Clears after `SET 0x3901` (Z0 sensor thickness) / `SET 0x2425` / `SET 0x3107` / axis param writes |
 
 Bit 21 appears in both `BUSY_MASK` (combined with bit 2) and `CMD_ACK` (alone); the two names reflect different uses of the same physical bit.
 

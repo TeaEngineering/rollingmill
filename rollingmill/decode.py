@@ -77,10 +77,10 @@ KNOWN_WVALUES: dict = {
     0x3009: 'spindle_stop',           # SET bare trigger (used in drilling sequences)
     0x3808: 'nc_spindle_speed',       # SET 2×uint16 [RPM, mode=2]; NC job only
     0x3809: 'rotatary_drill',         # SET 2×uint16 [1,0xFFFF]=start / [0,0]=stop (A-axis, Drill Workpiece dialog)
-    0x3900: 'spindle_rpm_read',       # Pattern B; GET 0x0003 → 1×uint32 RPM
-    0x3901: 'spindle_rpm_write',      # SET 1×uint32 RPM; waits ping bit21
     # ── Z0 probing ───────────────────────────────────────────────────────────
     0x2001: 'z0_sensor_status',
+    0x3900: 'z0_sensor_thickness_read',   # Pattern B; GET 0x0003 → 1×uint32, 1/1000 mm
+    0x3901: 'z0_sensor_thickness_write',  # SET 1×uint32, 1/1000 mm; waits ping bit21
     0x3902: 'z0_probe',
     # ── Operation bracket ────────────────────────────────────────────────────
     0x1109: 'op_bracket',             # SET 1 byte: 0x00=begin, 0xff=end
@@ -270,8 +270,8 @@ def decode_line(
             h, m = secs // 3600, (secs // 60) % 60
             return f"{ts}  SPINDLE_TIME  {h}h {m:02d}m  ({secs} s)"
         if last_trigger == 0x3900 and len(data) >= 4:
-            rpm = struct.unpack_from('>I', data)[0]
-            return f"{ts}  SPINDLE_RPM_CFG  {rpm} RPM"
+            um = struct.unpack_from('>I', data)[0]
+            return f"{ts}  Z0_SENSOR_THICKNESS  {um / 1000:.3f} mm"
         if last_trigger is not None and (
             last_trigger == 0x030b or 0x3202 <= last_trigger <= 0x320a
         ):
@@ -325,8 +325,8 @@ def decode_line(
         return f"{ts}  SPINDLE_STOP (bare)"
 
     if wv == 0x3901 and direction == '>' and len(data) >= 4:
-        rpm = struct.unpack_from('>I', data)[0]
-        return f"{ts}  SPINDLE_RPM_WRITE  {rpm} RPM"
+        um = struct.unpack_from('>I', data)[0]
+        return f"{ts}  Z0_SENSOR_THICKNESS_WRITE  {um / 1000:.3f} mm"
 
     if wv == 0x3808 and direction == '>' and len(data) >= 4:
         rpm, mode = struct.unpack_from('>HH', data)
