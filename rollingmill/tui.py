@@ -1053,7 +1053,7 @@ class TUI:
         win.erase()
         win.box()
 
-        wcs_lbl = 'MCS' if self._m.active_wcs == 0 else f'WCS{self._m.active_wcs}'
+        wcs_lbl = _machine.wcs_label(self._m.active_wcs)
         title = f' Move To  (using {wcs_lbl})'
         win.addstr(0, 2, title[:dw - 4], CP(_CP_HEADER) | BOLD)
 
@@ -1094,7 +1094,7 @@ class TUI:
 
         CP   = curses.color_pair
         BOLD = curses.A_BOLD
-        wcs_lbl = 'MCS' if self._m.active_wcs == 0 else f'WCS{self._m.active_wcs}'
+        wcs_lbl = _machine.wcs_label(self._m.active_wcs)
 
         win.erase()
         win.box()
