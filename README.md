@@ -15,6 +15,8 @@ RollingMill communicates directly with the machine over libusb, replacing both t
 * Streams saved G-code (`.nc` files) to the mill
 * Runs on Linux and macOS
 
+![Python versions](https://img.shields.io/pypi/pyversions/rollingmill.svg) ![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/TeaEngineering/rollingmill/ci.yml) [![PyPI version](https://badge.fury.io/py/rollingmill.svg)](https://badge.fury.io/py/rollingmill)
+
 <br clear="all">
 
 https://github.com/user-attachments/assets/d28e8a8f-c5a4-4877-8cd2-d2d479c63437
