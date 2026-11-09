@@ -1040,7 +1040,7 @@ class TUI:
         if self._move_sel >= len(targets):
             self._move_sel = len(targets) - 1
 
-        dh = min(6 + len(targets), rows - 2)
+        dh = min(5 + len(targets), rows - 2)
         dw = min(48, cols - 2)
         dy = (rows - dh) // 2
         dx = (cols - dw) // 2
@@ -1056,10 +1056,9 @@ class TUI:
         wcs_lbl = 'MCS' if self._m.active_wcs == 0 else f'WCS{self._m.active_wcs}'
         title = f' Move To  (using {wcs_lbl})'
         win.addstr(0, 2, title[:dw - 4], CP(_CP_HEADER) | BOLD)
-        win.addstr(1, 1, '─' * (dw - 2), CP(_CP_LABEL))
 
         for i, (label, _action) in enumerate(targets):
-            row = 2 + i
+            row = 1 + i
             if row >= dh - 3:
                 break
             is_sel = (i == self._move_sel)
