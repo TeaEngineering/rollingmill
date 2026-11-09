@@ -10,6 +10,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the package version comes from the git tag
 
       - uses: actions/setup-python@v5
         with:
@@ -36,6 +38,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the package version comes from the git tag
 
       - uses: actions/setup-python@v5
         with:
