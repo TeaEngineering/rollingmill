@@ -25,9 +25,10 @@ unobserved motion or timeout is reported as an unverified result, never success.
 Quit during an active cycle requests stop; quit again after idle to exit.
 
 You cannot start the Z-origin probing for machine coordinates (MCS - slot 0) since that
-offset is fixed at zero. VPanel only offers EXOFS and G54–G59 when the command set is NC Code or
-automatic, so the dialog warns when the command set is RML-1; whether the firmware
-accepts those modes then is not known. The cycle uses the machine's stored sensor
+offset is fixed at zero. VPanel offers User only in the RML-1 and automatic command sets, and EXOFS and
+G54–G59 only in NC Code and automatic, so the dialog warns when the target is not offered
+in the current command set (shown in the header, changed with `n`); whether the firmware
+accepts a probe there is not known. The cycle uses the machine's stored sensor
 thickness (GET 0x3900 / SET 0x3901, the Setup dialog's "Thickness of Z0 Sensor",
 1/1000 mm), which is read at connect, shown in the dialog and in the TUI state pane.
 

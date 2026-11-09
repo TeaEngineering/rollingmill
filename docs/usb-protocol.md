@@ -100,7 +100,7 @@ See [z-probing.md](z-probing.md) for the `SET 0x3902` operation that uses the z-
 
 | wValue | Name | Response | Notes |
 |--------|------|----------|-------|
-| `0x3106` | `query_0x3106_6bytes` | 6 bytes | Machine-config struct. `byte[1]` is the `nc_rml_flags` command-set selector: `0` = RML-1 only, `1` = NC Code only, `2` = Selected automatically (RML-1/NC). Read-modify-write paired with SET `0x3107`. See [sending-nc-code.md](sending-nc-code.md#command-set-selection-rml-1-vs-nc). |
+| `0x3106` | `query_0x3106_6bytes` | 6 bytes | Machine-config struct: command set and NC Code preferences, see [Machine config struct](#machine-config-struct-0x3106--0x3107). Read-modify-write paired with SET `0x3107`. See [sending-nc-code.md](sending-nc-code.md#command-set-selection-rml-1-vs-nc). |
 | `0x346b`–`0x3472` | `query_indexed_0x346a` (index 1–8) | 4 bytes each | Read tool diameter offsets (8 slots) |
 | `0x3700` | `get_uint32_0x3700` | 4 bytes | Single int32 - unknown purpose read 0x3700 write 0x3701, related to rotary axis/jig detect |
 | `0x3801` | `get_rotary_axis_centreline_0x3801` | 12 bytes | 3×uint32 = stored rotary A-axis centreline `[X, Y, Z]` in 1/1000 mm. Only `Y, Z` define the line (X is "along" the rotation axis, so its value is informational only). Written by the jig-detect routine via `SET 0x3803`. Read by the "Current Jig" indicator in the main panel — see [rotary-jig-alignment.md](rotary-jig-alignment.md#current-jig-indicator). |
@@ -150,6 +150,25 @@ Payload layouts and dispatch detail live in [move-commands.md](move-commands.md)
 
 See [z-probing.md](z-probing.md) for the `SET 0x3902` operation that uses the z-origin sensor.
 
+### Machine config struct (`0x3106` / `0x3107`)
+
+The 6 bytes read by GET `0x3106` and written back whole by SET `0x3107`. Each edited byte is the
+MFC radio index of a VPanel control, from the Setup dialog's "Modeling Machine" page (command set)
+and its "NC Code setting..." page (dialog resource 4020; `FUN_00404ff0` loads the page from bytes
+3, 2, 4 and `FUN_00405040` stores them back). VPanel writes only when something changed, and
+only enables the NC Code page for the NC Code and automatic command sets.
+
+| Byte | Meaning | Values |
+|------|---------|--------|
+| 0 | status | not edited; round-tripped |
+| 1 | command set (radios `0xFD3`–`0xFD5`) | `0` RML-1, `1` NC Code, `2` selected automatically |
+| 2 | values with decimal point (radios `0xFB8`–`0xFBB`) | `0` Conventional Method, `1` Calculator Method [All], `2` Calculator Method [F], `3` Calculator Method [IJKRXYZA] |
+| 3 | tool-diameter offset type (radios `0xFB5`, `0xFB6`); shown by rollingmill as "Tool-dia offset paths" | `0` = Type A, `1` = Type B |
+| 4 | optional block (radios `0xFBD`, `0xFBE`) | `0` Enabled, `1` Disabled |
+| 5 | unknown | not edited; round-tripped |
+
+The settings persist in the firmware across power cycles.
+
 ### Feed rate
 
 | wValue | Payload | Notes |
@@ -174,7 +193,7 @@ See [z-probing.md](z-probing.md) for the `SET 0x3902` operation that uses the z-
 
 | wValue | Payload | Notes |
 |--------|---------|-------|
-| `0x3107` | 6 bytes — modified `0x3106` struct | `send_axis_config_0x3107` @ `0x0041a370`. Writes back the 6-byte machine-config struct (read via GET `0x3106`); set `byte[1]` to `0-2` to switch command-set mode RML-1/NC/Auto. Poll ping bit 21 clear after. See [sending-nc-code.md](sending-nc-code.md#command-set-selection-rml-1-vs-nc). |
+| `0x3107` | 6 bytes — modified `0x3106` struct | `send_axis_config_0x3107` @ `0x0041a370`. Writes back the 6-byte machine-config struct (read via GET `0x3106`) with the edited bytes replaced: the command set and/or the NC Code preferences, see [Machine config struct](#machine-config-struct-0x3106--0x3107). Poll ping bit 21 clear after. See [sending-nc-code.md](sending-nc-code.md#command-set-selection-rml-1-vs-nc). |
 | `0x347b`–`0x3482` | `>I` — uint32 (index 1–8) | Write tool diameter offsets; poll ping bit 21 clear after each |
 | `0x2012` | 2×uint32 (8 bytes) | Write motion limits pair; poll ping bit 21 clear after |
 | `0x3468` | 1 byte (bool) | Toggle "Optional Block Skip" on/off |

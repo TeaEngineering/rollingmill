@@ -21,6 +21,7 @@ Keybindings:
   m          open Move-To picker (presets + User Specify numeric entry)
   t          open tool diameter offsets dialog
   b          Z0 sensor probe dialog (H sets thickness, Enter starts; Esc stops)
+  n          command mode dialog (command set + NC Code preferences)
   q          quit
 
 Cut panel (visible when --file is given):
@@ -87,6 +88,40 @@ _CP_DIM      = 13   # dimmed / unavailable
 
 # ── Curses log handler ────────────────────────────────────────────────────────
 
+# ── Command mode dialog data ─────────────────────────────────────────────────
+# (MachineConfig field, group label, [(value, option label), ...], NC Code preference?)
+# NC Code preferences are only editable in the NC Code or automatic command set, as in
+# VPanel (its "NC Code setting..." button is enabled for modes 1 and 2).
+_CMD_GROUPS = [
+    ('command_set',    'Command set',   list(_machine.CMDSET_LABELS.items()),         False),
+    ('offset_type',    'Tool-dia offset paths', list(_machine.OFFSET_TYPE_LABELS.items()), True),
+    ('decimal_method', 'Decimal point', list(_machine.DECIMAL_LABELS.items()),        True),
+    ('optional_block', 'Optional block', list(_machine.OPTIONAL_BLOCK_LABELS.items()), True),
+]
+_CMD_OPT_COL = 26   # option column: after the longest group label plus the ' *' pending mark
+_CMD_ROWS = [(key, value, label, nc_only)
+             for key, _group, options, nc_only in _CMD_GROUPS for value, label in options]
+
+
+def _cmd_mode_label(command_set: Optional[int]) -> str:
+    """Header text for the command set read from the machine."""
+    return {_machine.CMDSET_RML1: 'RML-1 mode', _machine.CMDSET_NC: 'NC mode',
+            _machine.CMDSET_AUTO: 'Auto-mode'}.get(command_set, 'mode ?')
+
+
+def _probe_mode_warning(slot: int, command_set: Optional[int]) -> Optional[str]:
+    """Why VPanel would not offer a Z-probe of `slot` in this command set, if it wouldn't.
+
+    VPanel's coordinate dropdown: RML-1 offers MCS and User; NC Code offers MCS, G54-G59 and
+    EXOFS; automatic offers all of them.
+    """
+    if slot >= 2 and command_set == _machine.CMDSET_RML1:
+        return 'Command set is RML-1; VPanel offers this only in NC/auto mode'
+    if slot == 1 and command_set == _machine.CMDSET_NC:
+        return 'Command set is NC Code; VPanel hides User in this mode'
+    return None
+
+
 class _LogBuffer(logging.Handler):
     """Captures log records into a fixed-size deque for the TUI log pane."""
 
@@ -147,7 +182,11 @@ class TUI:
         self._probe_buf     = ''      # Z0 thickness edit buffer (mm)
         self._probe_dirty   = False   # buffer edited but not yet sent with H
         self._probe_notice  = ''      # last result shown in the dialog
-        self._probe_cmdset  = None    # command set read when the dialog opened (0 RML-1, 1 NC, 2 auto)
+        self._cmd_open      = False   # command mode dialog
+        self._cmd_sel       = 0       # cursor: index into _CMD_ROWS
+        self._cmd_snapshot  = None    # MachineConfig as read when the dialog opened / last applied
+        self._cmd_vals      = {}      # pending value per MachineConfig field
+        self._cmd_notice    = ''      # last result shown in the dialog
 
     # ── Entry point ───────────────────────────────────────────────────────────
 
@@ -239,6 +278,9 @@ class TUI:
             return
         if self._move_open:
             self._move_handle_key(key)
+            return
+        if self._cmd_open:
+            self._cmd_handle_key(key)
             return
 
         if key == 27:                                  # Esc — cancel an in-flight jog
@@ -332,8 +374,125 @@ class TUI:
                     _machine.wcs_label(self._m.active_wcs))
             else:
                 self._probe_open_dialog()
+        elif key in (ord('n'), ord('N')):
+            if self._cut_job or self._jog_armed or self._drill_active:
+                log.warning("Close the NC job and stop jogging/drilling before changing the command mode")
+            else:
+                self._cmd_open_dialog()
         elif key in (ord('p'), ord('P')):
             self._m.fetch_axis_snapshot()
+
+    # ── Command mode dialog ('n' key) ─────────────────────────────────────────
+
+    def _cmd_open_dialog(self) -> None:
+        cfg = self._m.read_config()
+        if cfg is None:
+            log.warning("Command mode: could not read the machine config")
+            return
+        self._cmd_load(cfg)
+        self._cmd_notice = ''
+        self._cmd_sel = next(i for i, (key, value, _l, _n) in enumerate(_CMD_ROWS)
+                             if key == 'command_set' and value == cfg.command_set) \
+            if cfg.command_set in _machine.CMDSET_LABELS else 0
+        self._cmd_open = True
+
+    def _cmd_load(self, cfg) -> None:
+        self._cmd_snapshot = cfg
+        self._cmd_vals = {key: getattr(cfg, key) for key, _g, _o, _n in _CMD_GROUPS}
+
+    def _cmd_row_enabled(self, row) -> bool:
+        return not row[3] or self._cmd_vals['command_set'] != _machine.CMDSET_RML1
+
+    def _cmd_handle_key(self, key: int) -> None:
+        if key in (27, ord('q'), ord('Q')):
+            self._cmd_open = False
+        elif key == curses.KEY_UP:
+            self._cmd_move(-1)
+        elif key == curses.KEY_DOWN:
+            self._cmd_move(+1)
+        elif key in (32, curses.KEY_RIGHT):                 # Space / → — select this option
+            field, value, _label, _nc = _CMD_ROWS[self._cmd_sel]
+            self._cmd_vals[field] = value
+            self._cmd_notice = ''
+        elif key in (10, 13):                               # Enter — apply
+            self._cmd_apply()
+
+    def _cmd_move(self, step: int) -> None:
+        i = self._cmd_sel
+        while 0 <= i + step < len(_CMD_ROWS):
+            i += step
+            if self._cmd_row_enabled(_CMD_ROWS[i]):
+                self._cmd_sel = i
+                return
+
+    def _cmd_apply(self) -> None:
+        snap = self._cmd_snapshot
+        changes = {key: value for key, value in self._cmd_vals.items() if value != getattr(snap, key)}
+        if not changes:
+            self._cmd_notice = 'No changes to apply'
+            return
+        try:
+            ok = self._m.write_config(**changes)
+        except ValueError as exc:
+            self._cmd_notice = str(exc)
+            return
+        self.annotate(f"KEY n  command mode {changes} ok={ok}")
+        if self._m.config is not None:
+            self._cmd_load(self._m.config)                  # show what the machine now holds
+        self._cmd_notice = 'Applied' if ok else 'Apply failed: the machine did not accept or confirm the change'
+
+    def _draw_cmd_dialog(self, stdscr: curses.window, rows: int, cols: int) -> None:
+        CP   = curses.color_pair
+        BOLD = curses.A_BOLD
+
+        dh = 17
+        dw = min(70, cols - 2)
+        if rows < dh + 2 or dw < 70:
+            self._put(stdscr, 0, 0, "Command mode: enlarge terminal; Esc cancels")
+            stdscr.refresh()
+            return
+        try:
+            win = curses.newwin(dh, dw, (rows - dh) // 2, (cols - dw) // 2)
+        except curses.error:
+            return
+
+        win.erase()
+        win.box()
+        self._put(win, 0, 2, ' Command Mode', CP(_CP_HEADER) | BOLD)
+
+        group_label = {key: label for key, label, _o, _n in _CMD_GROUPS}
+        nc_prefs_enabled = self._cmd_vals['command_set'] != _machine.CMDSET_RML1
+        r, previous = 1, None
+        for i, row in enumerate(_CMD_ROWS):
+            field, value, label, _nc = row
+            enabled = self._cmd_row_enabled(row)
+            if field != previous:
+                pending = self._cmd_vals[field] != getattr(self._cmd_snapshot, field)
+                text = group_label[field] + (' *' if pending else '')
+                self._put(win, r, 2, text, CP(_CP_LABEL) if enabled else CP(_CP_DIM))
+                previous = field
+            chosen = self._cmd_vals[field] == value
+            if i == self._cmd_sel:
+                attr = CP(_CP_ACTIVE) | BOLD
+            elif not enabled:
+                attr = CP(_CP_DIM)
+            else:
+                attr = CP(_CP_VALUE) | (BOLD if chosen else 0)
+            width = dw - _CMD_OPT_COL - 1
+            self._put(win, r, _CMD_OPT_COL, f"{'(•)' if chosen else '( )'} {label}".ljust(width)[:width], attr)
+            r += 1
+
+        info = ('Stored in the machine; kept across power cycles.' if nc_prefs_enabled
+                else 'NC Code preferences need the NC Code or automatic command set.')
+        self._put(win, 12, 2, info[:dw - 4], CP(_CP_DIM))
+        if self._cmd_notice:
+            self._put(win, 13, 2, self._cmd_notice[:dw - 4], CP(_CP_LOG_WARN) | BOLD)
+
+        keys = ' ↑↓ navigate   ↵ apply   Space select   Esc close'
+        self._put(win, dh - 3, 1, '─' * (dw - 2), CP(_CP_LABEL))
+        self._put(win, dh - 2, 1, keys[:dw - 2], CP(_CP_KEYS))
+
+        win.refresh()
 
     # ── Z0 sensor probe dialog ('b' key) ──────────────────────────────────────
 
@@ -342,7 +501,6 @@ class TUI:
         self._probe_buf    = f'{thickness:.3f}' if thickness is not None else ''
         self._probe_dirty  = False
         self._probe_notice = ''
-        self._probe_cmdset = self._m.query_command_set()
         self._probe_confirm = True
 
     def _probe_dialog_key(self, key: int) -> None:
@@ -542,6 +700,9 @@ class TUI:
         if self._move_open:
             self._draw_move_dialog(stdscr, rows, cols)
 
+        if self._cmd_open:
+            self._draw_cmd_dialog(stdscr, rows, cols)
+
         if self._probe_confirm:
             self._draw_probe_dialog(stdscr, rows, cols)
 
@@ -575,9 +736,9 @@ class TUI:
         slot = self._m.active_wcs
         self._put(win, 5, 2, 'Target:', CP(_CP_LABEL))
         self._put(win, 5, 10, _machine.wcs_label(slot), CP(_CP_VALUE) | BOLD)
-        if slot >= 2 and self._probe_cmdset == _machine.MDX40A.CMDSET_RML1:
-            self._put(win, 6, 2, 'Command set is RML-1; VPanel only offers this in NC/auto mode'[:dw - 4],
-                      CP(_CP_LOG_WARN))
+        warning = _probe_mode_warning(slot, self._m.command_set)
+        if warning:
+            self._put(win, 6, 2, warning[:dw - 4], CP(_CP_LOG_WARN))
 
         stored = self._m.z0_sensor_thickness_mm
         stored_str = f'{stored:.3f} mm' if stored is not None else '?'
@@ -609,7 +770,7 @@ class TUI:
         wcs_lbl   = WCS_SLOT_NAMES[self._m.active_wcs]
         rotary_lbl = {0: "No Extension", 1: "Rotary Axis", 2: "Rotary Vice"}.get(
             self._m.rotary_extension_byte, "?")
-        title     = f" Roland MDX-40A  │  {speed_lbl}  │  XYZ {lin_lbl}mm  A {rot_lbl}°  │  {wcs_lbl}  │  {rotary_lbl} "
+        title     = f" Roland MDX-40A  │  {speed_lbl}  │  XYZ {lin_lbl}mm  A {rot_lbl}°  │  {wcs_lbl}  │  {rotary_lbl}  │  {_cmd_mode_label(self._m.command_set)} "
         self._put(win, 0, 0, title.ljust(cols), CP(_CP_HEADER) | BOLD)
 
         if height < 3:
@@ -704,7 +865,7 @@ class TUI:
         if ref_row > row + 1:
             key_lines = [
                 '  jog: ←→ X   ↑↓ Y   a/z Z   [] A    f speed (vslow/slow/medium/fast)   1-5 step',
-                '  s spindle   <> RPM   d A-drill   -/+ override%   c coords   m move-to   t tools   b Z-probe   q quit',
+                '  s spindle   <> RPM   d A-drill   -/+ override%   c coords   m move-to   t tools   b Z-probe   n cmd-mode   q quit',
             ]
             for i, line in enumerate(key_lines):
                 r = ref_row + i
