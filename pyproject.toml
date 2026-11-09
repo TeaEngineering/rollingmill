@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling>=1.21"]
+requires = ["hatchling>=1.21", "hatch-vcs>=0.4"]
 build-backend = "hatchling.build"
 
 [project]
@@ -59,7 +59,7 @@ Issues        = "https://github.com/TeaEngineering/rollingmill/issues"
 # ── Build / packaging ─────────────────────────────────────────────────────────
 
 [tool.hatch.version]
-path = "rollingmill/__init__.py"
+source = "vcs"
 
 [tool.hatch.build.targets.wheel]
 packages = ["rollingmill"]
