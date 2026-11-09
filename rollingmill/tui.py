@@ -774,8 +774,6 @@ class TUI:
         elif key in (10, 13):                      # Enter — activate
             self._m.set_active_wcs(self._wcs_sel)
         elif key in (ord('m'), ord('M')):          # Move to stored origin
-            if self._wcs_sel == 0:
-                return   # MCS origin is always (0,0,0,0) — no-op / already there
             if self._wcs_data and self._wcs_data[self._wcs_sel]:
                 ox, oy, oz, oa = self._wcs_data[self._wcs_sel]
                 self._m.move_to_machine_pos(ox, oy, oz, oa)
@@ -1040,7 +1038,7 @@ class TUI:
         if self._move_sel >= len(targets):
             self._move_sel = len(targets) - 1
 
-        dh = min(6 + len(targets), rows - 2)
+        dh = min(5 + len(targets), rows - 2)
         dw = min(48, cols - 2)
         dy = (rows - dh) // 2
         dx = (cols - dw) // 2
@@ -1053,13 +1051,12 @@ class TUI:
         win.erase()
         win.box()
 
-        wcs_lbl = 'MCS' if self._m.active_wcs == 0 else f'WCS{self._m.active_wcs}'
+        wcs_lbl = _machine.wcs_label(self._m.active_wcs)
         title = f' Move To  (using {wcs_lbl})'
         win.addstr(0, 2, title[:dw - 4], CP(_CP_HEADER) | BOLD)
-        win.addstr(1, 1, '─' * (dw - 2), CP(_CP_LABEL))
 
         for i, (label, _action) in enumerate(targets):
-            row = 2 + i
+            row = 1 + i
             if row >= dh - 3:
                 break
             is_sel = (i == self._move_sel)
@@ -1095,7 +1092,7 @@ class TUI:
 
         CP   = curses.color_pair
         BOLD = curses.A_BOLD
-        wcs_lbl = 'MCS' if self._m.active_wcs == 0 else f'WCS{self._m.active_wcs}'
+        wcs_lbl = _machine.wcs_label(self._m.active_wcs)
 
         win.erase()
         win.box()
