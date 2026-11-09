@@ -774,8 +774,6 @@ class TUI:
         elif key in (10, 13):                      # Enter — activate
             self._m.set_active_wcs(self._wcs_sel)
         elif key in (ord('m'), ord('M')):          # Move to stored origin
-            if self._wcs_sel == 0:
-                return   # MCS origin is always (0,0,0,0) — no-op / already there
             if self._wcs_data and self._wcs_data[self._wcs_sel]:
                 ox, oy, oz, oa = self._wcs_data[self._wcs_sel]
                 self._m.move_to_machine_pos(ox, oy, oz, oa)
