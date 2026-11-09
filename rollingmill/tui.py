@@ -549,7 +549,7 @@ class TUI:
         CP   = curses.color_pair
         BOLD = curses.A_BOLD
 
-        dh = 13
+        dh = 14
         dw = min(66, cols - 2)
         if rows < dh + 2 or dw < 40:
             self._put(stdscr, 0, 0, "Z-probe: enlarge terminal; Esc cancels")
@@ -570,28 +570,28 @@ class TUI:
             'Position the tool directly above it and close the cover.',
         ]
         for i, line in enumerate(lines):
-            self._put(win, 1 + i, 2, line[:dw - 4], CP(_CP_LABEL))
+            self._put(win, 1 + i, 2, line[:dw - 4], CP(_CP_DIM))
 
         slot = self._m.active_wcs
-        self._put(win, 4, 2, 'Target:', CP(_CP_LABEL))
-        self._put(win, 4, 10, _machine.wcs_label(slot), CP(_CP_VALUE) | BOLD)
+        self._put(win, 5, 2, 'Target:', CP(_CP_LABEL))
+        self._put(win, 5, 10, _machine.wcs_label(slot), CP(_CP_VALUE) | BOLD)
         if slot >= 2 and self._probe_cmdset == _machine.MDX40A.CMDSET_RML1:
-            self._put(win, 5, 2, 'Command set is RML-1; VPanel only offers this in NC/auto mode'[:dw - 4],
+            self._put(win, 6, 2, 'Command set is RML-1; VPanel only offers this in NC/auto mode'[:dw - 4],
                       CP(_CP_LOG_WARN))
 
         stored = self._m.z0_sensor_thickness_mm
         stored_str = f'{stored:.3f} mm' if stored is not None else '?'
         field = (self._probe_buf + '_') if self._probe_dirty else (self._probe_buf or '?')
         attr = (CP(_CP_ACTIVE) | BOLD) if self._probe_dirty else (CP(_CP_VALUE) | BOLD)
-        self._put(win, 6, 2, 'Thickness of Z0 sensor:', CP(_CP_LABEL))
-        self._put(win, 6, 26, f' {field:<9s}', attr)
-        self._put(win, 6, 37, 'mm', CP(_CP_LABEL))
-        self._put(win, 7, 2, f'in machine: {stored_str}   (limits {_machine.Z0_THICKNESS_MIN_MM:.0f}'
+        self._put(win, 7, 2, 'Thickness of Z0 sensor:', CP(_CP_LABEL))
+        self._put(win, 7, 26, f' {field:<9s}', attr)
+        self._put(win, 7, 37, 'mm', CP(_CP_LABEL))
+        self._put(win, 8, 2, f'in machine: {stored_str}   (limits {_machine.Z0_THICKNESS_MIN_MM:.0f}'
                              f'–{_machine.Z0_THICKNESS_MAX_MM:.0f} mm)'[:dw - 4], CP(_CP_DIM))
         if self._probe_notice:
-            self._put(win, 9, 2, self._probe_notice[:dw - 4], CP(_CP_LOG_WARN) | BOLD)
+            self._put(win, 10, 2, self._probe_notice[:dw - 4], CP(_CP_LOG_WARN) | BOLD)
 
-        keys = ' Enter start probe   H set thickness   0-9 . edit   Esc cancel'
+        keys = ' ↵ start probe   H set thickness   0-9 . edit   Esc close'
         self._put(win, dh - 3, 1, '─' * (dw - 2), CP(_CP_LABEL))
         self._put(win, dh - 2, 1, keys[:dw - 2], CP(_CP_KEYS))
 
